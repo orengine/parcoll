@@ -1,0 +1,21 @@
+[package]
+name = "parcoll"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+
+[target.'cfg(parcoll_loom)'.dependencies]
+loom = "0.7.2"
+
+[features]
+default = []
+always_steal = []
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(parcoll_loom)'] }
+
+[[test]]
+name = "loom_tests"
+path = "src/tests/loom.rs"
+required-features = ["always_steal"]
