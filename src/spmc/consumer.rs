@@ -1,6 +1,12 @@
+//! This module provides the [`Consumer`] trait.
 use crate::spmc::Producer;
 use std::mem::MaybeUninit;
 
+/// A consumer of the single-producer, multi-consumer queue.
+/// It can pop values and be cloned.
+/// 
+/// [`Producers`](Producer) doesn't implement this trait but also can pop values
+/// and even do it faster.
 pub trait Consumer<T> {
     /// An associated [`producer`](Producer) with this consumer.
     type AssociatedProducer: Producer<T>;

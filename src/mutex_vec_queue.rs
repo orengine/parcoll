@@ -325,7 +325,7 @@ mod tests {
     #[test]
     fn test_global_queue_with_local() {
         let global_queue = MutexVecQueue::new();
-        let (mut producer, _) = crate::spmc::new_const_bounded::<_, 256>();
+        let (mut producer, _) = crate::spmc::new_bounded::<_, 256>();
 
         for i in 0..N / BATCH_SIZE {
             let slice = (0..BATCH_SIZE - 1)

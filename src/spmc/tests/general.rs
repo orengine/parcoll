@@ -1,5 +1,5 @@
 use crate::backoff::Backoff;
-use crate::spmc::{new_const_bounded, Consumer as ConsumerExt, Producer as ProducerExt, SPMCConsumer};
+use crate::spmc::{new_bounded, Consumer as ConsumerExt, Producer as ProducerExt, SPMCConsumer};
 use std::mem::MaybeUninit;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -37,7 +37,7 @@ impl<T> std::ops::Deref for TestValue<T> {
 static RAND: AtomicUsize = AtomicUsize::new(4);
 
 #[test]
-fn multi_threaded_steal() {
+fn test_multi_spmc_bounded_threaded_steal() {
     const N: usize = if cfg!(miri) { 200 } else { 10_000_000 };
     const CHECK_TO: usize = if cfg!(feature = "always_steal") {
         N
@@ -46,7 +46,7 @@ fn multi_threaded_steal() {
     };
 
     let counter = Arc::new(AtomicUsize::new(0));
-    let (mut producer, consumer) = new_const_bounded();
+    let (mut producer, consumer) = new_bounded();
 
     let counter0 = counter.clone();
     let consumer1 = consumer.clone();
@@ -89,7 +89,7 @@ fn multi_threaded_steal() {
         counter: Arc<AtomicUsize>,
     ) -> Vec<usize> {
         let mut stats = vec![0; N];
-        let (mut dest_producer, _) = new_const_bounded();
+        let (mut dest_producer, _) = new_bounded();
 
         loop {
             consumer.steal_into(&mut dest_producer);
@@ -137,7 +137,7 @@ fn multi_threaded_steal() {
 }
 
 #[test]
-fn multi_threaded_pop_many() {
+fn test_multi_spmc_bounded_threaded_pop_many() {
     const N: usize = if cfg!(miri) { 200 } else { 10_000_000 };
     const BATCH_SIZE: usize = 5;
     const RES: usize = (N - 1) * N / 2;
@@ -165,7 +165,7 @@ fn multi_threaded_pop_many() {
         }
     }
 
-    let (mut producer, consumer) = new_const_bounded();
+    let (mut producer, consumer) = new_bounded();
     let consumer1 = consumer.clone();
     let consumer2 = consumer.clone();
     let count = Arc::new(AtomicUsize::new(0));

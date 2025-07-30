@@ -1,6 +1,6 @@
 use parcoll::loom_bindings::thread;
 use parcoll::spmc::{
-    new_cache_padded_const_bounded, new_const_bounded, CachePaddedSPMCConsumer, Consumer, Producer,
+    new_cache_padded_bounded, new_bounded, CachePaddedSPMCConsumer, Consumer, Producer,
 };
 
 #[test]
@@ -9,10 +9,10 @@ fn loom_basic_steal() {
     const ITEM_COUNT_PER_LOOP: usize = 10_000;
 
     loom::model(|| {
-        let (mut producer, consumer) = new_const_bounded();
+        let (mut producer, consumer) = new_bounded();
 
         let th = thread::spawn(move || {
-            let (mut dest_producer, _) = new_const_bounded();
+            let (mut dest_producer, _) = new_bounded();
             let mut n = 0;
 
             for _ in 0..3 {
@@ -60,7 +60,7 @@ fn loom_multi_stealer() {
     const ITEM_COUNT: usize = 15_000;
 
     fn steal_half(consumer: CachePaddedSPMCConsumer<usize>) -> usize {
-        let (mut dest_worker, _) = new_cache_padded_const_bounded();
+        let (mut dest_worker, _) = new_cache_padded_bounded();
 
         let _ = consumer.steal_into(&mut dest_worker);
 
@@ -73,7 +73,7 @@ fn loom_multi_stealer() {
     }
 
     loom::model(|| {
-        let (mut producer, consumer) = new_cache_padded_const_bounded();
+        let (mut producer, consumer) = new_cache_padded_bounded();
         let consumer1 = consumer.clone();
         let consumer2 = consumer.clone();
 
@@ -101,8 +101,8 @@ fn loom_multi_stealer() {
 #[test]
 fn loom_chained_steal() {
     loom::model(|| {
-        let (mut producer1, consumer1) = new_const_bounded();
-        let (mut producer2, consumer2) = new_const_bounded();
+        let (mut producer1, consumer1) = new_bounded();
+        let (mut producer2, consumer2) = new_bounded();
 
         for _ in 0..40 {
             producer1.maybe_push(42).unwrap();
@@ -110,7 +110,7 @@ fn loom_chained_steal() {
         }
 
         let th = thread::spawn(move || {
-            let (mut dest_producer, _) = new_const_bounded();
+            let (mut dest_producer, _) = new_bounded();
             let _ = consumer1.steal_into(&mut dest_producer);
 
             while dest_producer.pop().is_some() {}
@@ -131,13 +131,13 @@ fn loom_chained_steal() {
 #[cfg(feature = "always_steal")]
 fn loom_push_and_steal() {
     fn steal_half(consumer: CachePaddedSPMCConsumer<usize>) -> usize {
-        let (mut dest_producer, _) = new_cache_padded_const_bounded();
+        let (mut dest_producer, _) = new_cache_padded_bounded();
 
         consumer.steal_into(&mut dest_producer)
     }
 
     loom::model(|| {
-        let (mut producer, consumer) = new_cache_padded_const_bounded();
+        let (mut producer, consumer) = new_cache_padded_bounded();
         let consumer1 = consumer.clone();
         let consumer2 = consumer.clone();
 
