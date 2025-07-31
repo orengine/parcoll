@@ -12,19 +12,19 @@ pub trait Consumer<T> {
     type AssociatedProducer: Producer<T>;
 
     /// Returns the capacity of the queue.
-    fn capacity(&self) -> usize;
+    fn capacity(&mut self) -> usize;
 
     /// Returns the length of the queue.
-    fn len(&self) -> usize;
+    fn len(&mut self) -> usize;
 
     /// Returns whether the queue is empty.
     #[inline]
-    fn is_empty(&self) -> bool {
+    fn is_empty(&mut self) -> bool {
         self.len() == 0
     }
 
     /// Pops many values from the queue and returns the number of read values.
-    fn pop_many(&self, dst: &mut [MaybeUninit<T>]) -> usize;
+    fn pop_many(&mut self, dst: &mut [MaybeUninit<T>]) -> usize;
 
     /// Steals some values from the consumer and places them into `dst`.
     ///
@@ -33,5 +33,5 @@ pub trait Consumer<T> {
     /// but other implementations may steal another number of values.
     ///
     /// It accepts a mutable reference to the producer that guarantees exclusivity.
-    fn steal_into(&self, dst: &mut Self::AssociatedProducer) -> usize;
+    fn steal_into(&mut self, dst: &mut Self::AssociatedProducer) -> usize;
 }

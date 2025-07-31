@@ -49,9 +49,9 @@ fn test_multi_spmc_bounded_threaded_steal() {
     let (mut producer, consumer) = new_bounded();
 
     let counter0 = counter.clone();
-    let consumer1 = consumer.clone();
+    let mut consumer1 = consumer.clone();
     let counter1 = counter.clone();
-    let consumer2 = consumer;
+    let mut consumer2 = consumer;
     let counter2 = counter;
 
     // Producer thread.
@@ -85,7 +85,7 @@ fn test_multi_spmc_bounded_threaded_steal() {
     //
     // Repeatedly steal a random number of items.
     fn steal_periodically(
-        consumer: &Consumer<TestValue<usize>>,
+        consumer: &mut Consumer<TestValue<usize>>,
         counter: Arc<AtomicUsize>,
     ) -> Vec<usize> {
         let mut stats = vec![0; N];
@@ -111,8 +111,8 @@ fn test_multi_spmc_bounded_threaded_steal() {
         stats
     }
 
-    let t1 = spawn(move || steal_periodically(&consumer1, counter1));
-    let t2 = spawn(move || steal_periodically(&consumer2, counter2));
+    let t1 = spawn(move || steal_periodically(&mut consumer1, counter1));
+    let t2 = spawn(move || steal_periodically(&mut consumer2, counter2));
     let mut stats = Vec::new();
 
     stats.push(t0.join().unwrap());
@@ -142,7 +142,7 @@ fn test_multi_spmc_bounded_threaded_pop_many() {
     const BATCH_SIZE: usize = 5;
     const RES: usize = (N - 1) * N / 2;
 
-    fn consumer_pop_many(consumer: &Consumer<usize>, count: &AtomicUsize) {
+    fn consumer_pop_many(consumer: &mut Consumer<usize>, count: &AtomicUsize) {
         let mut slice = [MaybeUninit::uninit(); BATCH_SIZE];
         let backoff = Backoff::new();
 
@@ -166,14 +166,14 @@ fn test_multi_spmc_bounded_threaded_pop_many() {
     }
 
     let (mut producer, consumer) = new_bounded();
-    let consumer1 = consumer.clone();
-    let consumer2 = consumer.clone();
+    let mut consumer1 = consumer.clone();
+    let mut consumer2 = consumer.clone();
     let count = Arc::new(AtomicUsize::new(0));
     let count1 = count.clone();
     let count2 = count.clone();
 
-    let t0 = spawn(move || consumer_pop_many(&consumer1, &count1));
-    let t1 = spawn(move || consumer_pop_many(&consumer2, &count2));
+    let t0 = spawn(move || consumer_pop_many(&mut consumer1, &count1));
+    let t1 = spawn(move || consumer_pop_many(&mut consumer2, &count2));
 
     let mut slice = [0; BATCH_SIZE];
     for i in 0..N / BATCH_SIZE {

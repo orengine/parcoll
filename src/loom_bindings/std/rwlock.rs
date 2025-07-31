@@ -3,7 +3,7 @@ use std::sync::{self, RwLockReadGuard, RwLockWriteGuard, TryLockError};
 /// Adapter for `std::sync::RwLock` that removes the poisoning aspects
 /// from its api.
 #[derive(Debug)]
-pub(crate) struct RwLock<T: ?Sized>(sync::RwLock<T>);
+pub struct RwLock<T: ?Sized>(sync::RwLock<T>);
 
 #[allow(dead_code)]
 impl<T> RwLock<T> {
@@ -14,10 +14,7 @@ impl<T> RwLock<T> {
 
     #[inline]
     pub(crate) fn read(&self) -> RwLockReadGuard<'_, T> {
-        match self.0.read() {
-            Ok(guard) => guard,
-            Err(p_err) => p_err.into_inner(),
-        }
+        self.0.read().unwrap_or_else(|p_err| p_err.into_inner())
     }
 
     #[inline]
@@ -31,10 +28,7 @@ impl<T> RwLock<T> {
 
     #[inline]
     pub(crate) fn write(&self) -> RwLockWriteGuard<'_, T> {
-        match self.0.write() {
-            Ok(guard) => guard,
-            Err(p_err) => p_err.into_inner(),
-        }
+        self.0.write().unwrap_or_else(|p_err| p_err.into_inner())
     }
 
     #[inline]

@@ -16,72 +16,6 @@ const SPIN_LIMIT: u32 = 6;
 /// scheduler, and tell when is a good time to block the thread using a different synchronization
 /// mechanism. Each step of the back off procedure takes roughly twice as long as the previous
 /// step.
-///
-/// # Examples
-///
-/// Backing off in a lock-free loop:
-///
-/// ```
-/// use std::sync::atomic::AtomicUsize;
-/// use std::sync::atomic::Ordering::SeqCst;
-/// use parcoll::Backoff;
-///
-/// fn fetch_mul(a: &AtomicUsize, b: usize) -> usize {
-///     let backoff = Backoff::new();
-///
-///     loop {
-///         let val = a.load(SeqCst);
-///         if a.compare_exchange(val, val.wrapping_mul(b), SeqCst, SeqCst).is_ok() {
-///             return val;
-///         }
-///
-///         backoff.spin();
-///     }
-/// }
-/// ```
-///
-/// Waiting for an [`AtomicBool`] to become `true`:
-///
-/// ```
-/// use std::sync::atomic::AtomicBool;
-/// use std::sync::atomic::Ordering::SeqCst;
-/// use parcoll::Backoff;
-///
-/// fn spin_wait(ready: &AtomicBool) {
-///     let backoff = Backoff::new();
-///
-///     while !ready.load(SeqCst) {
-///         backoff.snooze();
-///     }
-/// }
-/// ```
-///
-/// Waiting for an [`AtomicBool`] to become `true` and parking the thread after a long wait.
-/// Note that whoever sets the atomic variable to `true` must notify the parked thread by calling
-/// [`unpark()`]:
-///
-/// ```
-/// use parcoll::Backoff;
-/// use std::sync::atomic::AtomicBool;
-/// use std::sync::atomic::Ordering::SeqCst;
-/// use std::thread;
-///
-/// fn blocking_wait(ready: &AtomicBool) {
-///     let backoff = Backoff::new();
-///
-///     while !ready.load(SeqCst) {
-///         if backoff.is_completed() {
-///             thread::park();
-///         } else {
-///             backoff.snooze();
-///         }
-///     }
-/// }
-/// ```
-///
-/// [`std::thread::park()`]: std::thread::park
-/// [`AtomicBool`]: std::sync::atomic::AtomicBool
-/// [`unpark()`]: std::thread::Thread::unpark
 pub struct Backoff {
     step: Cell<u32>,
 }
@@ -95,6 +29,10 @@ impl Backoff {
 
     /// Resets the backoff state.
     #[inline]
+    #[allow(
+        dead_code,
+        reason = "It is fork, therefore it is more convenient to keep all original methods"
+    )]
     pub fn reset(&self) {
         self.step.set(0);
     }
@@ -105,33 +43,6 @@ impl Backoff {
     /// progress.
     ///
     /// The processor may yield using the *YIELD* or *PAUSE* instruction.
-    ///
-    /// # Examples
-    ///
-    /// Backing off in a lock-free loop:
-    ///
-    /// ```
-    /// use parcoll::Backoff;
-    /// use std::sync::atomic::AtomicUsize;
-    /// use std::sync::atomic::Ordering::SeqCst;
-    ///
-    /// fn fetch_mul(a: &AtomicUsize, b: usize) -> usize {
-    ///     let backoff = Backoff::new();
-    ///
-    ///     loop {
-    ///         let val = a.load(SeqCst);
-    ///         if a.compare_exchange(val, val.wrapping_mul(b), SeqCst, SeqCst).is_ok() {
-    ///             return val;
-    ///         }
-    ///
-    ///         backoff.spin();
-    ///     }
-    /// }
-    ///
-    /// let a = AtomicUsize::new(7);
-    /// assert_eq!(fetch_mul(&a, 8), 7);
-    /// assert_eq!(a.load(SeqCst), 56);
-    /// ```
     #[inline]
     #[allow(
         dead_code,
@@ -159,48 +70,11 @@ impl Backoff {
     ///
     /// [`spin`]: Backoff::spin
     /// [`is_completed`]: Backoff::is_completed
-    ///
-    /// # Examples
-    ///
-    /// Waiting for an [`AtomicBool`] to become `true`:
-    ///
-    /// ```
-    /// use parcoll::Backoff;
-    /// use std::sync::Arc;
-    /// use std::sync::atomic::AtomicBool;
-    /// use std::sync::atomic::Ordering::SeqCst;
-    /// use std::thread;
-    /// use std::time::Duration;
-    ///
-    /// fn spin_wait(ready: &AtomicBool) {
-    ///     let backoff = Backoff::new();
-    ///
-    ///     while !ready.load(SeqCst) {
-    ///         backoff.snooze();
-    ///     }
-    /// }
-    ///
-    /// let ready = Arc::new(AtomicBool::new(false));
-    /// let ready2 = ready.clone();
-    ///
-    /// # let t =
-    /// thread::spawn(move || {
-    ///     thread::sleep(Duration::from_millis(100));
-    ///
-    ///     ready2.store(true, SeqCst);
-    /// });
-    ///
-    /// assert_eq!(ready.load(SeqCst), false);
-    ///
-    /// spin_wait(&ready);
-    ///
-    /// assert_eq!(ready.load(SeqCst), true);
-    ///
-    /// # t.join().unwrap(); // join thread to avoid https://github.com/rust-lang/miri/issues/1371
-    /// ```
-    ///
-    /// [`AtomicBool`]: std::sync::atomic::AtomicBool
     #[inline]
+    #[allow(
+        dead_code,
+        reason = "It is fork, therefore it is more convenient to keep all original methods"
+    )]
     pub fn snooze(&self) {
         if likely(self.step.get() <= SPIN_LIMIT) {
             for _ in 0..1 << self.step.get().min(SPIN_LIMIT) {
@@ -214,53 +88,6 @@ impl Backoff {
     }
 
     /// Returns `true` if exponential backoff has completed and blocking the thread is advised.
-    ///
-    /// # Examples
-    ///
-    /// Waiting for an [`AtomicBool`] to become `true` and parking the thread after a long wait:
-    ///
-    /// ```
-    /// use parcoll::Backoff;
-    /// use std::sync::Arc;
-    /// use std::sync::atomic::AtomicBool;
-    /// use std::sync::atomic::Ordering::SeqCst;
-    /// use std::thread;
-    /// use std::time::Duration;
-    ///
-    /// fn blocking_wait(ready: &AtomicBool) {
-    ///     let backoff = Backoff::new();
-    ///
-    ///     while !ready.load(SeqCst) {
-    ///         if backoff.is_completed() {
-    ///             thread::park();
-    ///         } else {
-    ///             backoff.snooze();
-    ///         }
-    ///     }
-    /// }
-    ///
-    /// let ready = Arc::new(AtomicBool::new(false));
-    /// let ready2 = ready.clone();
-    /// let waiter = thread::current();
-    ///
-    /// # let t =
-    /// thread::spawn(move || {
-    ///     thread::sleep(Duration::from_millis(100));
-    ///
-    ///     ready2.store(true, SeqCst);
-    ///
-    ///     waiter.unpark();
-    /// });
-    ///
-    /// assert_eq!(ready.load(SeqCst), false);
-    ///
-    /// blocking_wait(&ready);
-    ///
-    /// assert_eq!(ready.load(SeqCst), true);
-    /// # t.join().unwrap(); // join thread to avoid https://github.com/rust-lang/miri/issues/1371
-    /// ```
-    ///
-    /// [`AtomicBool`]: std::sync::atomic::AtomicBool
     #[inline]
     pub fn is_completed(&self) -> bool {
         self.step.get() >= SPIN_LIMIT

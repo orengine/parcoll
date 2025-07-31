@@ -11,6 +11,7 @@ loom = "0.7.2"
 [features]
 default = []
 always_steal = []
+disable_unbounded = []
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(parcoll_loom)'] }

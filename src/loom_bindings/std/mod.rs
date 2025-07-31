@@ -1,13 +1,15 @@
 #![cfg_attr(parcoll_loom, allow(unused_imports, dead_code))]
 
-mod atomic_u16;
-mod atomic_u32;
-mod atomic_u64;
+mod atomic16;
+mod atomic32;
+mod atomic64;
 mod atomic_usize;
 mod barrier;
 mod mutex;
 mod rwlock;
 mod unsafe_cell;
+mod atomic8;
+mod atomic_ptr;
 
 pub mod cell {}
 
@@ -44,15 +46,18 @@ pub mod sync {
     // consuming code.
 
     #[allow(unused_imports)]
-    pub use std::sync::{Condvar, MutexGuard, RwLockReadGuard, WaitTimeoutResult};
+    pub use std::sync::{Condvar, MutexGuard, RwLockReadGuard, WaitTimeoutResult, RwLockWriteGuard};
 
     pub use crate::loom_bindings::std::mutex::Mutex;
+    pub use crate::loom_bindings::std::rwlock::RwLock;
 
     pub mod atomic {
-        pub use crate::loom_bindings::std::atomic_u16::AtomicU16;
-        pub use crate::loom_bindings::std::atomic_u32::AtomicU32;
-        pub use crate::loom_bindings::std::atomic_u64::AtomicU64;
-        pub use crate::loom_bindings::std::atomic_usize::AtomicUsize;
+        pub use crate::loom_bindings::std::atomic8::{AtomicU8, AtomicI8};
+        pub use crate::loom_bindings::std::atomic16::{AtomicU16, AtomicI16};
+        pub use crate::loom_bindings::std::atomic32::{AtomicU32, AtomicI32};
+        pub use crate::loom_bindings::std::atomic64::{AtomicU64, AtomicI64};
+        pub use crate::loom_bindings::std::atomic_usize::{AtomicUsize, AtomicIsize};
+        pub use crate::loom_bindings::std::atomic_ptr::AtomicPtr;
     }
 }
 
