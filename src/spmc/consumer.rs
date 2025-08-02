@@ -7,7 +7,7 @@ use std::mem::MaybeUninit;
 /// 
 /// [`Producers`](Producer) doesn't implement this trait but also can pop values
 /// and even do it faster.
-pub trait Consumer<T> {
+pub trait Consumer<T>: Clone + Send {
     /// An associated [`producer`](Producer) with this consumer.
     type AssociatedProducer: Producer<T>;
 

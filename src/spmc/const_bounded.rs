@@ -10,6 +10,7 @@ use std::mem::{needs_drop, MaybeUninit};
 use std::ops::Deref;
 use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
 use std::{ptr, slice};
+use std::marker::PhantomData;
 use crate::light_arc::LightArc;
 use crate::number_types::{CachePaddedLongAtomic, LongAtomic, LongNumber, NotCachePaddedLongAtomic};
 
@@ -25,12 +26,27 @@ use crate::number_types::{CachePaddedLongAtomic, LongAtomic, LongNumber, NotCach
 
 // Reads from the head, writes to the tail.
 
-/// A single-producer multi-consumer queue.
+/// The single-producer, multi-consumer ring-based _const bounded_ queue.
 ///
-/// It is implemented as a const bounded ring buffer.
-/// It is optimized for the work-stealing model.
+/// It is safe to use when and only when only one thread is writing to the queue at the same time.
+///
+/// You can call `producer_` methods for the producer and `consumer_` methods for the consumers.
+///
+/// It accepts the atomic wrapper as a generic parameter.
+/// It allows using cache-padded atomics or not.
+/// You should create types aliases not to write this large type name.
+///
+/// # Using directly the [`SPMCBoundedQueue`] vs. using [`new_bounded`] or [`new_cache_padded_bounded`].
+///
+/// Functions [`new_bounded`] and [`new_cache_padded_bounded`] allocate the
+/// [`SPMCUnboundedQueue`] on the heap in [`LightArc`] and provide separate producer and consumer.
+/// It hurts the performance if you don't need to allocate the queue separately, but improve
+/// the readability when you need to separate producer and consumer logic and share them.
+///
+/// It doesn't implement the [`Producer`] and [`Consumer`] traits because all producer methods
+/// are unsafe (can be called only by one thread).
 #[repr(C)]
-struct SPMCBoundedQueue<
+pub struct SPMCBoundedQueue<
     T,
     const CAPACITY: usize,
     AtomicWrapper: Deref<Target = LongAtomic> + Default = NotCachePaddedLongAtomic,
@@ -49,8 +65,8 @@ impl<T, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> + Defau
     /// queue (or any other `SyncBatchReceiver`) as we are also inserting the `value` argument.
     const NUM_VALUES_TAKEN: LongNumber = CAPACITY as LongNumber / 2;
 
-    /// Creates a new queue.
-    fn new() -> Self {
+    /// Creates a new [`SPMCBoundedQueue`].
+    pub fn new() -> Self {
         debug_assert!(size_of::<MaybeUninit<T>>() == size_of::<T>()); // Assume that we can just cast it
 
         Self {
@@ -60,6 +76,12 @@ impl<T, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> + Defau
             tail: AtomicWrapper::default(),
             head: AtomicWrapper::default(),
         }
+    }
+
+    /// Returns the capacity of the queue.
+    #[inline]
+    pub fn capacity(&self) -> usize {
+        CAPACITY
     }
 
     /// Returns a pointer to the buffer.
@@ -111,14 +133,27 @@ impl<T, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> + Defau
         start_tail.wrapping_add(slice.len() as LongNumber)
     }
 
-    /// Pops a value from the queue.
-    /// Can be called only by the producer.
+    /// Return the number of elements in the queue.
     ///
     /// # Safety
     ///
     /// The called should be the only producer.
     #[inline]
-    unsafe fn producer_pop(&self) -> Option<T> {
+    pub unsafe fn producer_len(&self) -> usize {
+        let head = self.head.load(Relaxed);
+        let tail = unsafe { self.tail.unsync_load() }; // only producer can change tail
+
+        Self::len(head, tail)
+    }
+
+    /// Pops a value from the queue.
+    /// Returns `None` if the queue is empty.
+    ///
+    /// # Safety
+    ///
+    /// The called should be the only producer.
+    #[inline]
+    pub unsafe fn producer_pop(&self) -> Option<T> {
         let mut head = self.head.load(Acquire);
         let tail = unsafe { self.tail.unsync_load() }; // only producer can change tail
 
@@ -150,13 +185,13 @@ impl<T, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> + Defau
     }
 
     /// Pops many values from the queue.
-    /// Can be called only by the producer.
+    /// Returns the number of values popped.
     ///
     /// # Safety
     ///
     /// The called should be the only producer.
     #[inline]
-    unsafe fn producer_pop_many(&self, dst: &mut [MaybeUninit<T>]) -> usize {
+    pub unsafe fn producer_pop_many(&self, dst: &mut [MaybeUninit<T>]) -> usize {
         let mut head = self.head.load(Acquire);
         let tail = unsafe { self.tail.unsync_load() }; // only producer can change tail
 
@@ -219,13 +254,12 @@ impl<T, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> + Defau
     }
 
     /// Pushes a value to the queue.
-    /// Can be called only by the producer.
     ///
     /// # Safety
     ///
     /// The called should be the only producer and the queue should not be full.
     #[inline(always)]
-    unsafe fn push_unchecked(&self, value: T, tail: LongNumber) {
+    pub unsafe fn push_unchecked(&self, value: T, tail: LongNumber) {
         unsafe {
             self
                 .buffer_mut_thin_ptr()
@@ -367,13 +401,12 @@ impl<T, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> + Defau
     }
 
     /// Pushes a value to the queue or to the [`SyncBatchReceiver`].
-    /// Can be called only by the producer.
     ///
     /// # Safety
     ///
     /// The called should be the only producer.
     #[inline]
-    unsafe fn producer_push<SBR: SyncBatchReceiver<T>>(&self, value: T, sync_batch_receiver: &SBR) {
+    pub unsafe fn producer_push<SBR: SyncBatchReceiver<T>>(&self, value: T, sync_batch_receiver: &SBR) {
         let head = self.head.load(Acquire);
         let tail = unsafe { self.tail.unsync_load() }; // only producer can change tail
 
@@ -387,13 +420,12 @@ impl<T, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> + Defau
     }
 
     /// Pushes a value to the queue or returns an error.
-    /// Can be called only by the producer.
     ///
     /// # Safety
     ///
     /// The called should be the only producer.
     #[inline]
-    unsafe fn producer_maybe_push(&self, value: T) -> Result<(), T> {
+    pub unsafe fn producer_maybe_push(&self, value: T) -> Result<(), T> {
         let head = self.head.load(Acquire);
         let tail = unsafe { self.tail.unsync_load() }; // only producer can change tail
 
@@ -409,13 +441,13 @@ impl<T, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> + Defau
     }
 
     /// Pushes many values to the queue.
-    /// Can be called only by the producer.
+    /// It accepts two slices to allow using ring-based src.
     ///
     /// # Safety
     ///
     /// The called should be the only producer and the space is enough.
     #[inline]
-    unsafe fn producer_push_many_unchecked(&self, first: &[T], last: &[T]) {
+    pub unsafe fn producer_push_many_unchecked(&self, first: &[T], last: &[T]) {
         if cfg!(debug_assertions) {
             let head = self.head.load(Acquire);
             let tail = unsafe { self.tail.unsync_load() }; // only producer can change tail
@@ -434,13 +466,12 @@ impl<T, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> + Defau
     }
 
     /// Pushes many values to the queue or to the [`SyncBatchReceiver`].
-    /// Can be called only by the producer.
     ///
     /// # Safety
     ///
     /// The called should be the only producer.
     #[inline]
-    unsafe fn producer_push_many<SBR: SyncBatchReceiver<T>>(
+    pub unsafe fn producer_push_many<SBR: SyncBatchReceiver<T>>(
         &self,
         slice: &[T],
         sync_batch_receiver: &SBR,
@@ -460,13 +491,12 @@ impl<T, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> + Defau
     }
 
     /// Pushes many values to the queue or returns an error.
-    /// Can be called only by the producer.
     ///
     /// # Safety
     ///
     /// The called should be the only producer.
     #[inline]
-    unsafe fn producer_maybe_push_many(&self, slice: &[T]) -> Result<(), ()> {
+    pub unsafe fn producer_maybe_push_many(&self, slice: &[T]) -> Result<(), ()> {
         let head = self.head.load(Acquire);
         let mut tail = unsafe { self.tail.unsync_load() }; // only producer can change tail
 
@@ -488,10 +518,30 @@ impl<T, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> + Defau
 impl<T, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> + Default>
     SPMCBoundedQueue<T, CAPACITY, AtomicWrapper>
 {
+    /// Returns the number of values in the queue.
+    #[inline]
+    pub fn consumer_len(&self) -> usize {
+        loop {
+            let head = self.head.load(Relaxed);
+            let tail = self.tail.load(Relaxed);
+            let len = Self::len(head, tail);
+
+            if unlikely(len > CAPACITY) {
+                // Inconsistent state (this thread has been preempted
+                // after we have loaded `head`,
+                // and before we have loaded `tail`),
+                // try again
+                continue;
+            }
+
+            return len;
+        }
+    }
+
     /// Pops many values from the queue to the `dst`.
     /// Returns the number of values popped.
     #[inline]
-    fn consumer_pop_many(&self, dst: &mut [MaybeUninit<T>]) -> usize {
+    pub fn consumer_pop_many(&self, dst: &mut [MaybeUninit<T>]) -> usize {
         let mut head = self.head.load(Acquire);
         let mut tail = self.tail.load(Acquire);
 
@@ -573,7 +623,7 @@ impl<T, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> + Defau
 
     /// Steals many values from the consumer to the `dst`.
     /// Returns the number of values stolen.
-    fn steal_into(&self, dst: &Self) -> usize {
+    pub fn steal_into(&self, dst: &Self) -> usize {
         let mut src_head = self.head.load(Acquire);
         let dst_tail = unsafe { dst.tail.unsync_load() }; // only producer can change tail
 
@@ -706,11 +756,12 @@ impl<T, const CAPACITY: usize, AtomicWrapper> Drop for SPMCBoundedQueue<T, CAPAC
 /// Generates SPMC producer and consumer.
 macro_rules! generate_spmc_producer_and_consumer {
     ($producer_name:ident, $consumer_name:ident, $atomic_wrapper:ty) => {
+        /// The producer of the [`SPMCBoundedQueue`].
         pub struct $producer_name<T, const CAPACITY: usize> {
             inner: LightArc<SPMCBoundedQueue<T, CAPACITY, $atomic_wrapper>>,
         }
 
-        impl<T, const CAPACITY: usize> Producer<T> for $producer_name<T, CAPACITY> {
+        impl<T: Send, const CAPACITY: usize> Producer<T> for $producer_name<T, CAPACITY> {
             #[inline]
             fn capacity(&self) -> usize {
                 CAPACITY as usize
@@ -718,10 +769,7 @@ macro_rules! generate_spmc_producer_and_consumer {
 
             #[inline]
             fn len(&mut self) -> usize {
-                let head = self.inner.head.load(Relaxed);
-                let tail = unsafe { self.inner.tail.unsync_load() }; // only producer can change tail
-
-                SPMCBoundedQueue::<T, CAPACITY, $atomic_wrapper>::len(head, tail)
+                unsafe { self.inner.producer_len() }
             }
 
             #[inline]
@@ -764,11 +812,16 @@ macro_rules! generate_spmc_producer_and_consumer {
             }
         }
 
+        unsafe impl<T: Send, const CAPACITY: usize> Sync for $producer_name<T, CAPACITY> {}
+        unsafe impl<T: Send, const CAPACITY: usize> Send for $producer_name<T, CAPACITY> {}
+
+        /// The consumer of the [`SPMCBoundedQueue`].
         pub struct $consumer_name<T, const CAPACITY: usize> {
             inner: LightArc<SPMCBoundedQueue<T, CAPACITY, $atomic_wrapper>>,
+            _non_sync: PhantomData<*const ()>,
         }
 
-        impl<T, const CAPACITY: usize> Consumer<T> for $consumer_name<T, CAPACITY> {
+        impl<T: Send, const CAPACITY: usize> Consumer<T> for $consumer_name<T, CAPACITY> {
             type AssociatedProducer = $producer_name<T, CAPACITY>;
 
             #[inline]
@@ -778,21 +831,7 @@ macro_rules! generate_spmc_producer_and_consumer {
 
             #[inline]
             fn len(&mut self) -> usize {
-                loop {
-                    let head = self.inner.head.load(Relaxed);
-                    let tail = self.inner.tail.load(Relaxed);
-                    let len = SPMCBoundedQueue::<T, CAPACITY, $atomic_wrapper>::len(head, tail);
-
-                    if unlikely(len > CAPACITY) {
-                        // Inconsistent state (this thread has been preempted
-                        // after we have loaded `head`,
-                        // and before we have loaded `tail`),
-                        // try again
-                        continue;
-                    }
-
-                    return len;
-                }
+                self.inner.consumer_len()
             }
 
             #[inline]
@@ -810,9 +849,12 @@ macro_rules! generate_spmc_producer_and_consumer {
             fn clone(&self) -> Self {
                 Self {
                     inner: self.inner.clone(),
+                    _non_sync: PhantomData,
                 }
             }
         }
+
+        unsafe impl<T: Send, const CAPACITY: usize> Send for $consumer_name<T, CAPACITY> {}
     };
 
     ($producer_name:ident, $consumer_name:ident) => {
@@ -870,7 +912,7 @@ pub fn new_bounded<T, const CAPACITY: usize>(
         SPMCProducer {
             inner: queue.clone(),
         },
-        SPMCConsumer { inner: queue },
+        SPMCConsumer { inner: queue, _non_sync: PhantomData },
     )
 }
 
@@ -926,7 +968,7 @@ pub fn new_cache_padded_bounded<T, const CAPACITY: usize>() -> (
         CachePaddedSPMCProducer {
             inner: queue.clone(),
         },
-        CachePaddedSPMCConsumer { inner: queue },
+        CachePaddedSPMCConsumer { inner: queue, _non_sync: PhantomData },
     )
 }
 

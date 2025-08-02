@@ -3,45 +3,45 @@ use crate::loom_bindings::sync::atomic::{AtomicI32, AtomicU32, AtomicU64};
 
 #[cfg(target_has_atomic = "64")]
 /// Synonym for the unsigned number with the size of the longest atomic.
-pub(crate) type LongNumber = u64;
+pub type LongNumber = u64;
 #[cfg(all(target_has_atomic = "32", not(target_pointer_width = "64")))]
 /// Synonym for the unsigned number with the size of the longest atomic.
-pub(crate) type LongNumber = u32;
+pub type LongNumber = u32;
 #[cfg(all(
     target_has_atomic = "16",
     all(not(target_has_atomic = "32"), not(target_pointer_width = "64"))
 ))]
 /// Synonym for the unsigned number with the size of the longest atomic.
-pub(crate) type LongNumber = u16;
+pub type LongNumber = u16;
 
 #[cfg(target_has_atomic = "64")]
 /// Synonym for the longest atomic.
-pub(crate) type LongAtomic = AtomicU64;
+pub type LongAtomic = AtomicU64;
 #[cfg(all(target_has_atomic = "32", not(target_pointer_width = "64")))]
 /// Synonym for the longest atomic.
-pub(crate) type LongAtomic = AtomicU32;
+pub type LongAtomic = AtomicU32;
 #[cfg(all(
     target_has_atomic = "16",
     all(not(target_has_atomic = "32"), not(target_pointer_width = "64"))
 ))]
 /// Synonym for the longest atomic.
-pub(crate) type LongAtomic = loom_bindings::sync::atomic::AtomicU16;
+pub type LongAtomic = loom_bindings::sync::atomic::AtomicU16;
 
 #[cfg(target_has_atomic = "64")]
 /// Synonym for the cache padded longest atomic.
-pub(crate) type CachePaddedLongAtomic = crate::cache_padded::CachePaddedAtomicU64;
+pub type CachePaddedLongAtomic = crate::cache_padded::CachePaddedAtomicU64;
 #[cfg(all(target_has_atomic = "32", not(target_pointer_width = "64")))]
 /// Synonym for the cache padded longest atomic.
-pub(crate) type CachePaddedLongAtomic = crate::cache_padded::CachePaddedAtomicU32;
+pub type CachePaddedLongAtomic = crate::cache_padded::CachePaddedAtomicU32;
 #[cfg(all(
     target_has_atomic = "16",
     all(not(target_has_atomic = "32"), not(target_pointer_width = "64"))
 ))]
 /// Synonym for the longest atomic.
-pub(crate) type CachePaddedLongAtomic = crate::cache_padded::CachePaddedAtomicU16;
+pub type CachePaddedLongAtomic = crate::cache_padded::CachePaddedAtomicU16;
 
 /// Synonym for the non-cache padded longest atomic.
-pub(crate) struct NotCachePaddedLongAtomic(LongAtomic);
+pub struct NotCachePaddedLongAtomic(LongAtomic);
 
 impl Deref for NotCachePaddedLongAtomic {
     type Target = LongAtomic;
@@ -58,7 +58,7 @@ impl Default for NotCachePaddedLongAtomic {
 }
 
 /// Synonym for the non-cache padded [`AtomicU32`].
-pub(crate) struct NotCachePaddedAtomicU32(AtomicU32);
+pub struct NotCachePaddedAtomicU32(AtomicU32);
 
 impl Deref for NotCachePaddedAtomicU32 {
     type Target = AtomicU32;
@@ -75,7 +75,7 @@ impl Default for NotCachePaddedAtomicU32 {
 }
 
 /// Synonym for the non-cache padded [`AtomicU64`].
-pub(crate) struct NotCachePaddedAtomicU64(AtomicU64);
+pub struct NotCachePaddedAtomicU64(AtomicU64);
 
 impl Deref for NotCachePaddedAtomicU64 {
     type Target = AtomicU64;
@@ -91,7 +91,7 @@ impl Default for NotCachePaddedAtomicU64 {
     }
 }
 
-pub(crate) struct NonCachePaddedAtomicI32 {
+pub struct NonCachePaddedAtomicI32 {
     atomic: AtomicI32,
 }
 

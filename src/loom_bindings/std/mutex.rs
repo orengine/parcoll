@@ -8,7 +8,7 @@ pub struct Mutex<T: ?Sized>(sync::Mutex<T>);
 #[allow(dead_code)]
 impl<T> Mutex<T> {
     #[inline]
-    pub fn new(t: T) -> Mutex<T> {
+    pub const fn new(t: T) -> Mutex<T> {
         Mutex(sync::Mutex::new(t))
     }
 
