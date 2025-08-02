@@ -4,9 +4,9 @@ use std::mem::MaybeUninit;
 
 /// A producer of the single-producer, multi-consumer queue.
 /// It can push values and pop them.
-/// 
+///
 /// Because it is the only producer, it can pop and push values very quickly.
-pub trait Producer<T> {
+pub trait Producer<T>: Send + Sync {
     /// Returns the capacity of the queue.
     fn capacity(&self) -> usize;
 

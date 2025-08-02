@@ -2,8 +2,8 @@
 pub(crate) struct UnsafeCell<T>(std::cell::UnsafeCell<T>);
 
 impl<T> UnsafeCell<T> {
-    pub(crate) const fn new(data: T) -> UnsafeCell<T> {
-        UnsafeCell(std::cell::UnsafeCell::new(data))
+    pub(crate) const fn new(data: T) -> Self {
+        Self(std::cell::UnsafeCell::new(data))
     }
 
     #[inline(always)]
