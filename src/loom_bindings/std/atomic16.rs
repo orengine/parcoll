@@ -55,12 +55,12 @@ cfg_has_atomic_u16! {
         /// All mutations must have happened before the unsynchronized load.
         /// Additionally, there must be no concurrent mutations.
         pub unsafe fn unsync_load(&self) -> u16 {
-            core::ptr::read(self.inner.get() as *const u16)
+            unsafe { core::ptr::read(self.inner.get() as *const u16) }
         }
     }
 
     impl Default for AtomicU16 {
-        fn default() -> AtomicU16 {
+        fn default() -> Self {
             Self {
                 inner: UnsafeCell::new(std::sync::atomic::AtomicU16::new(0)),
             }
@@ -107,12 +107,12 @@ cfg_has_atomic_u16! {
         /// All mutations must have happened before the unsynchronized load.
         /// Additionally, there must be no concurrent mutations.
         pub unsafe fn unsync_load(&self) -> i16 {
-            core::ptr::read(self.inner.get() as *const i16)
+            unsafe { core::ptr::read(self.inner.get() as *const i16) }
         }
     }
 
     impl Default for AtomicI16 {
-        fn default() -> AtomicI16 {
+        fn default() -> Self {
             Self {
                 inner: UnsafeCell::new(std::sync::atomic::AtomicI16::new(0)),
             }

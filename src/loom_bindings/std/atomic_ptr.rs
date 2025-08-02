@@ -42,7 +42,7 @@ cfg_has_atomic_ptr! {
         ///
         /// Caller must ensure no concurrent mutation.
         pub unsafe fn unsync_load(&self) -> *mut T {
-            core::ptr::read(self.inner.get().cast())
+            unsafe { core::ptr::read(self.inner.get().cast()) }
         }
     }
 

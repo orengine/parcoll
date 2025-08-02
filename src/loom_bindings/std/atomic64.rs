@@ -55,12 +55,12 @@ cfg_has_atomic_u64! {
         /// All mutations must have happened before the unsynchronized load.
         /// Additionally, there must be no concurrent mutations.
         pub unsafe fn unsync_load(&self) -> u64 {
-            core::ptr::read(self.inner.get() as *const u64)
+            unsafe { core::ptr::read(self.inner.get() as *const u64) }
         }
     }
 
     impl Default for AtomicU64 {
-        fn default() -> AtomicU64 {
+        fn default() -> Self {
             Self {
                 inner: UnsafeCell::new(std::sync::atomic::AtomicU64::new(0)),
             }
@@ -107,12 +107,12 @@ cfg_has_atomic_u64! {
         /// All mutations must have happened before the unsynchronized load.
         /// Additionally, there must be no concurrent mutations.
         pub unsafe fn unsync_load(&self) -> i64 {
-            core::ptr::read(self.inner.get() as *const i64)
+            unsafe { core::ptr::read(self.inner.get() as *const i64) }
         }
     }
 
     impl Default for AtomicI64 {
-        fn default() -> AtomicI64 {
+        fn default() -> Self {
             Self {
                 inner: UnsafeCell::new(std::sync::atomic::AtomicI64::new(0)),
             }
@@ -213,7 +213,7 @@ cfg_not_has_atomic_u64! {
             }
         }
     }
-    
+
     #[derive(Debug)]
     pub(crate) struct AtomicI64 {
         inner: Mutex<i64>,

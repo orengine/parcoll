@@ -55,12 +55,12 @@ cfg_has_atomic_u32! {
         /// All mutations must have happened before the unsynchronized load.
         /// Additionally, there must be no concurrent mutations.
         pub unsafe fn unsync_load(&self) -> u32 {
-            core::ptr::read(self.inner.get() as *const u32)
+            unsafe { core::ptr::read(self.inner.get() as *const u32) }
         }
     }
 
     impl Default for AtomicU32 {
-        fn default() -> AtomicU32 {
+        fn default() -> Self {
             Self {
                 inner: UnsafeCell::new(std::sync::atomic::AtomicU32::new(0)),
             }
@@ -107,12 +107,12 @@ cfg_has_atomic_u32! {
         /// All mutations must have happened before the unsynchronized load.
         /// Additionally, there must be no concurrent mutations.
         pub unsafe fn unsync_load(&self) -> i32 {
-            core::ptr::read(self.inner.get() as *const i32)
+            unsafe { core::ptr::read(self.inner.get() as *const i32) }
         }
     }
 
     impl Default for AtomicI32 {
-        fn default() -> AtomicI32 {
+        fn default() -> Self {
             Self {
                 inner: UnsafeCell::new(std::sync::atomic::AtomicI32::new(0)),
             }

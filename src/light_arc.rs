@@ -1,10 +1,10 @@
 //! This module provides [`LightArc`].
-use std::alloc::{dealloc, Layout};
+use crate::hints::unlikely;
+use crate::loom_bindings::sync::atomic::AtomicUsize;
+use std::alloc::{Layout, dealloc};
 use std::ptr;
 use std::ptr::NonNull;
 use std::sync::atomic::Ordering;
-use crate::hints::unlikely;
-use crate::loom_bindings::sync::atomic::AtomicUsize;
 
 /// An inner type for [`LightArc`].
 #[repr(C)]
@@ -19,7 +19,7 @@ struct LightArcInner<T> {
 /// Therefore, it can't provide weak references.
 #[repr(C)]
 pub struct LightArc<T> {
-    inner: NonNull<LightArcInner<T>>
+    inner: NonNull<LightArcInner<T>>,
 }
 
 impl<T> LightArc<T> {
@@ -30,7 +30,9 @@ impl<T> LightArc<T> {
             value,
         });
 
-        LightArc { inner: NonNull::from(Box::leak(inner)) }
+        Self {
+            inner: NonNull::from(Box::leak(inner)),
+        }
     }
 
     /// Returns a reference to the inner value.
@@ -50,7 +52,10 @@ impl<T> LightArc<T> {
         unsafe {
             ptr::drop_in_place(&mut self.inner.as_mut().value);
 
-            dealloc(self.inner.as_ptr() as *mut u8, Layout::new::<LightArcInner<T>>());
+            dealloc(
+                self.inner.as_ptr().cast(),
+                Layout::new::<LightArcInner<T>>(),
+            );
         }
     }
 }
@@ -61,7 +66,7 @@ impl<T> Clone for LightArc<T> {
 
         debug_assert!(count > 0, "use after free");
 
-        LightArc { inner: self.inner }
+        Self { inner: self.inner }
     }
 }
 

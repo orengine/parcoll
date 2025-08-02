@@ -1,5 +1,5 @@
-use std::ops::Deref;
 use crate::loom_bindings::sync::atomic::{AtomicI32, AtomicU32, AtomicU64};
+use std::ops::Deref;
 
 #[cfg(target_has_atomic = "64")]
 /// Synonym for the unsigned number with the size of the longest atomic.
@@ -105,6 +105,8 @@ impl Deref for NonCachePaddedAtomicI32 {
 
 impl Default for NonCachePaddedAtomicI32 {
     fn default() -> Self {
-        NonCachePaddedAtomicI32 { atomic: AtomicI32::new(0) }
+        Self {
+            atomic: AtomicI32::new(0),
+        }
     }
 }

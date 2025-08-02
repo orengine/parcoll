@@ -3,13 +3,13 @@
 mod atomic16;
 mod atomic32;
 mod atomic64;
+mod atomic8;
+mod atomic_ptr;
 mod atomic_usize;
 mod barrier;
 mod mutex;
 mod rwlock;
 mod unsafe_cell;
-mod atomic8;
-mod atomic_ptr;
 
 pub mod cell {}
 
@@ -28,13 +28,8 @@ pub mod rand {
     pub fn seed() -> u64 {
         let rand_state = RandomState::new();
 
-        let mut hasher = rand_state.build_hasher();
-
-        // Hash some unique-ish data to generate some new state
-        COUNTER.fetch_add(1, Relaxed).hash(&mut hasher);
-
         // Get the seed
-        hasher.finish()
+        rand_state.hash_one(COUNTER.fetch_add(1, Relaxed))
     }
 }
 
@@ -45,19 +40,20 @@ pub mod sync {
     // internal use. Note however that some are not _currently_ named by
     // consuming code.
 
-    #[allow(unused_imports)]
-    pub use std::sync::{Condvar, MutexGuard, RwLockReadGuard, WaitTimeoutResult, RwLockWriteGuard};
+    pub use std::sync::{
+        Condvar, MutexGuard, RwLockReadGuard, RwLockWriteGuard, WaitTimeoutResult,
+    };
 
     pub use crate::loom_bindings::std::mutex::Mutex;
     pub use crate::loom_bindings::std::rwlock::RwLock;
 
     pub mod atomic {
-        pub use crate::loom_bindings::std::atomic8::{AtomicU8, AtomicI8};
-        pub use crate::loom_bindings::std::atomic16::{AtomicU16, AtomicI16};
-        pub use crate::loom_bindings::std::atomic32::{AtomicU32, AtomicI32};
-        pub use crate::loom_bindings::std::atomic64::{AtomicU64, AtomicI64};
-        pub use crate::loom_bindings::std::atomic_usize::{AtomicUsize, AtomicIsize};
         pub use crate::loom_bindings::std::atomic_ptr::AtomicPtr;
+        pub use crate::loom_bindings::std::atomic_usize::{AtomicIsize, AtomicUsize};
+        pub use crate::loom_bindings::std::atomic8::{AtomicI8, AtomicU8};
+        pub use crate::loom_bindings::std::atomic16::{AtomicI16, AtomicU16};
+        pub use crate::loom_bindings::std::atomic32::{AtomicI32, AtomicU32};
+        pub use crate::loom_bindings::std::atomic64::{AtomicI64, AtomicU64};
     }
 }
 
@@ -75,9 +71,8 @@ pub mod thread {
         std::thread::yield_now();
     }
 
-    #[allow(unused_imports)]
     pub use std::thread::{
-        current, panicking, park, park_timeout, sleep, spawn, AccessError, Builder, JoinHandle,
-        LocalKey, Result, Thread, ThreadId,
+        AccessError, Builder, JoinHandle, LocalKey, Result, Thread, ThreadId, current, panicking,
+        park, park_timeout, sleep, spawn,
     };
 }

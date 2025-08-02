@@ -18,16 +18,16 @@ impl<T> VecQueue<T> {
         debug_assert!(capacity > 0 && capacity.is_power_of_two());
 
         unsafe {
-            std::alloc::alloc(std::alloc::Layout::array::<T>(capacity).unwrap_unchecked()) as *mut T
+            std::alloc::alloc(std::alloc::Layout::array::<T>(capacity).unwrap_unchecked()).cast()
         }
     }
 
     fn deallocate(ptr: *mut T, capacity: usize) {
         unsafe {
             std::alloc::dealloc(
-                ptr as *mut u8,
+                ptr.cast(),
                 std::alloc::Layout::array::<T>(capacity).unwrap_unchecked(),
-            )
+            );
         }
     }
 
@@ -76,22 +76,18 @@ impl<T> VecQueue<T> {
         unsafe {
             let phys_head = self.get_physical_index(self.head);
             let phys_tail = self.get_physical_index(self.tail);
+            let src = self.ptr.add(phys_head);
+            let dst = new_ptr;
 
             if phys_head < phys_tail {
-                let src = self.ptr.add(phys_head);
-                let dst = new_ptr;
-
-                std::ptr::copy(src, dst, len);
+                ptr::copy(src, dst, len);
             } else {
-                let src = self.ptr.add(phys_head);
-                let dst = new_ptr;
-
-                std::ptr::copy(src, dst, self.capacity - phys_head);
+                ptr::copy(src, dst, self.capacity - phys_head);
 
                 let src = self.ptr;
                 let dst = new_ptr.add(self.capacity - phys_head);
 
-                std::ptr::copy(src, dst, phys_tail);
+                ptr::copy(src, dst, phys_tail);
             }
         }
 
@@ -244,6 +240,12 @@ impl<T> MutexVecQueue<T> {
     }
 }
 
+impl<T> Default for MutexVecQueue<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<T> SyncBatchReceiver<T> for MutexVecQueue<T> {
     fn push_many_and_one(&self, first: &[T], last: &[T], value: T) {
         let mut inner = self.inner.lock();
@@ -255,7 +257,7 @@ impl<T> SyncBatchReceiver<T> for MutexVecQueue<T> {
         }
 
         assert_hint(
-            inner.len() + first.len() + last.len() + 1 <= inner.capacity,
+            inner.len() + first.len() + last.len() < inner.capacity,
             "capacity was not updated",
         );
 
@@ -263,6 +265,9 @@ impl<T> SyncBatchReceiver<T> for MutexVecQueue<T> {
         inner.extend_from_slice(last);
 
         inner.push(unsafe { ptr::read(&value) });
+        
+        // Clippy wants it
+        drop(inner);
     }
 
     fn push_many_and_slice(&self, first: &[T], last: &[T], slice: &[T]) {

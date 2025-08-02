@@ -55,12 +55,12 @@ cfg_has_atomic_u8! {
         /// All mutations must have happened before the unsynchronized load.
         /// Additionally, there must be no concurrent mutations.
         pub unsafe fn unsync_load(&self) -> u8 {
-            core::ptr::read(self.inner.get() as *const u8)
+            unsafe { core::ptr::read(self.inner.get() as *const u8) }
         }
     }
 
     impl Default for AtomicU8 {
-        fn default() -> AtomicU8 {
+        fn default() -> Self {
             Self {
                 inner: UnsafeCell::new(std::sync::atomic::AtomicU8::new(0)),
             }
@@ -107,12 +107,12 @@ cfg_has_atomic_u8! {
         /// All mutations must have happened before the unsynchronized load.
         /// Additionally, there must be no concurrent mutations.
         pub unsafe fn unsync_load(&self) -> i8 {
-            core::ptr::read(self.inner.get() as *const i8)
+            unsafe { core::ptr::read(self.inner.get() as *const i8) }
         }
     }
 
     impl Default for AtomicI8 {
-        fn default() -> AtomicI8 {
+        fn default() -> Self {
             Self {
                 inner: UnsafeCell::new(std::sync::atomic::AtomicI8::new(0)),
             }

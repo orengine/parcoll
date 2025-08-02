@@ -1,19 +1,20 @@
 //! This module provides a single-producer multi-consumer unbounded queue. Read more in
 //! [`new_unbounded`].
-use std::mem::{needs_drop, MaybeUninit};
-use std::ops::Deref;
-use std::{ptr, slice};
-use std::marker::PhantomData;
-use std::sync::atomic::Ordering;
-use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
+#![allow(clippy::cast_possible_truncation, reason = "LongNumber should be synonymous to usize")]
 use crate::cache_padded::{CachePaddedAtomicU32, CachePaddedAtomicU64};
 use crate::hints::{cold_path, unlikely};
 use crate::light_arc::LightArc;
 use crate::loom_bindings::sync::atomic::{AtomicU32, AtomicU64};
 use crate::naive_rw_lock::NaiveRWLock;
 use crate::number_types::{NotCachePaddedAtomicU32, NotCachePaddedAtomicU64};
+use crate::spmc::{Consumer, Producer};
 use crate::sync_batch_receiver::SyncBatchReceiver;
-use crate::spmc::{Producer, Consumer};
+use std::marker::PhantomData;
+use std::mem::{MaybeUninit, needs_drop};
+use std::ops::Deref;
+use std::sync::atomic::Ordering;
+use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
+use std::{ptr, slice};
 
 /// Packs the version and the tail into a single 64-bit value.
 #[inline(always)]
@@ -43,15 +44,15 @@ impl<T> Version<T> {
     }
 
     /// Allocates a new version with the given `capacity` and `id`.
-    fn alloc_new(capacity: usize, id: u32) -> LightArc<Version<T>> {
-        debug_assert!(capacity > 0 && capacity <= u32::MAX as usize && capacity.is_power_of_two());
+    fn alloc_new(capacity: usize, id: u32) -> LightArc<Self> {
+        debug_assert!(capacity > 0 && u32::try_from(capacity).is_ok() && capacity.is_power_of_two());
 
         let slice_ptr = (0..capacity)
             .map(|_| MaybeUninit::uninit())
             .collect::<Vec<_>>()
             .into_boxed_slice();
 
-        LightArc::new(Version {
+        LightArc::new(Self {
             ptr: Box::into_raw(slice_ptr),
             mask: (capacity - 1) as u32,
             id,
@@ -61,7 +62,7 @@ impl<T> Version<T> {
     /// Returns a raw pointer to the underlying buffer.
     #[inline(always)]
     unsafe fn thin_mut_ptr(&self) -> *mut T {
-        (*self.ptr).as_ptr().cast_mut().cast()
+        unsafe { (*self.ptr).as_ptr().cast_mut().cast() }
     }
 }
 
@@ -154,8 +155,13 @@ impl<T> Clone for CachedVersion<T> {
 /// It doesn't implement the [`Producer`] and [`Consumer`] traits because all producer methods
 /// are unsafe (can be called only by one thread).
 #[repr(C)]
-pub(crate) struct SPMCUnboundedQueue<T, AtomicU32Wrapper = NotCachePaddedAtomicU32, AtomicU64Wrapper = NotCachePaddedAtomicU64>
-    where AtomicU32Wrapper: Deref<Target = AtomicU32> + Default, AtomicU64Wrapper: Deref<Target = AtomicU64> + Default
+pub(crate) struct SPMCUnboundedQueue<
+    T,
+    AtomicU32Wrapper = NotCachePaddedAtomicU32,
+    AtomicU64Wrapper = NotCachePaddedAtomicU64,
+> where
+    AtomicU32Wrapper: Deref<Target = AtomicU32> + Default,
+    AtomicU64Wrapper: Deref<Target = AtomicU64> + Default,
 {
     /// First the producer updates the real version,
     /// and next sets a new id. The version id is monotonic.
@@ -164,8 +170,11 @@ pub(crate) struct SPMCUnboundedQueue<T, AtomicU32Wrapper = NotCachePaddedAtomicU
     last_version: NaiveRWLock<LightArc<Version<T>>>,
 }
 
-impl<T, AtomicU32Wrapper, AtomicU64Wrapper> SPMCUnboundedQueue<T, AtomicU32Wrapper, AtomicU64Wrapper>
-    where AtomicU32Wrapper: Deref<Target = AtomicU32> + Default, AtomicU64Wrapper: Deref<Target = AtomicU64> + Default
+impl<T, AtomicU32Wrapper, AtomicU64Wrapper>
+    SPMCUnboundedQueue<T, AtomicU32Wrapper, AtomicU64Wrapper>
+where
+    AtomicU32Wrapper: Deref<Target = AtomicU32> + Default,
+    AtomicU64Wrapper: Deref<Target = AtomicU64> + Default,
 {
     /// Creates a new queue with the given capacity.
     fn with_capacity(capacity: usize) -> Self {
@@ -257,8 +266,11 @@ impl<T, AtomicU32Wrapper, AtomicU64Wrapper> SPMCUnboundedQueue<T, AtomicU32Wrapp
 }
 
 // Producer
-impl<T, AtomicU32Wrapper, AtomicU64Wrapper> SPMCUnboundedQueue<T, AtomicU32Wrapper, AtomicU64Wrapper>
-    where AtomicU32Wrapper: Deref<Target = AtomicU32> + Default, AtomicU64Wrapper: Deref<Target = AtomicU64> + Default
+impl<T, AtomicU32Wrapper, AtomicU64Wrapper>
+    SPMCUnboundedQueue<T, AtomicU32Wrapper, AtomicU64Wrapper>
+where
+    AtomicU32Wrapper: Deref<Target = AtomicU32> + Default,
+    AtomicU64Wrapper: Deref<Target = AtomicU64> + Default,
 {
     /// Returns the length of the queue.
     ///
@@ -269,7 +281,7 @@ impl<T, AtomicU32Wrapper, AtomicU64Wrapper> SPMCUnboundedQueue<T, AtomicU32Wrapp
     unsafe fn producer_len(&self) -> usize {
         let head = self.head.load(Acquire);
         let tail = unsafe { self.unsync_load_tail() }; // only producer can change tail
-        
+
         // We can avoid checking the version,
         // because the producer always has the latest version.
 
@@ -288,16 +300,17 @@ impl<T, AtomicU32Wrapper, AtomicU64Wrapper> SPMCUnboundedQueue<T, AtomicU32Wrapp
     }
 
     /// Pushes a slice into the queue. Returns a new tail (not index).
-    fn copy_slice(buffer_ptr: *mut T, start_tail: u32, slice: &[T], version: &CachedVersion<T>) -> u32 {
+    fn copy_slice(
+        buffer_ptr: *mut T,
+        start_tail: u32,
+        slice: &[T],
+        version: &CachedVersion<T>,
+    ) -> u32 {
         let tail_idx = (start_tail & version.mask) as usize;
 
         if tail_idx + slice.len() <= version.capacity() {
             unsafe {
-                ptr::copy_nonoverlapping(
-                    slice.as_ptr(),
-                    buffer_ptr.add(tail_idx),
-                    slice.len(),
-                )
+                ptr::copy_nonoverlapping(slice.as_ptr(), buffer_ptr.add(tail_idx), slice.len())
             };
         } else {
             let right = version.capacity() - tail_idx;
@@ -322,9 +335,10 @@ impl<T, AtomicU32Wrapper, AtomicU64Wrapper> SPMCUnboundedQueue<T, AtomicU32Wrapp
         head: u32,
         mut tail: u32,
         new_capacity: usize,
-        old_version: &CachedVersion<T>
+        old_version: &CachedVersion<T>,
     ) -> (CachedVersion<T>, u32) {
-        let new_version: LightArc<Version<T>> = Version::alloc_new(new_capacity, old_version.id() + 1);
+        let new_version: LightArc<Version<T>> =
+            Version::alloc_new(new_capacity, old_version.id() + 1);
 
         // The key idea is to transform the buffer viewed as:
         // [ 7 8 1 2 3 4 5 6 ]
@@ -345,12 +359,18 @@ impl<T, AtomicU32Wrapper, AtomicU64Wrapper> SPMCUnboundedQueue<T, AtomicU32Wrapp
 
                 if old_head_idx < old_tail_idx {
                     (
-                        slice::from_raw_parts(old_version.thin_ptr().add(old_head_idx).cast(), old_tail_idx - old_head_idx),
+                        slice::from_raw_parts(
+                            old_version.thin_ptr().add(old_head_idx).cast(),
+                            old_tail_idx - old_head_idx,
+                        ),
                         &[],
                     )
                 } else {
                     (
-                        slice::from_raw_parts(old_version.thin_ptr().add(old_head_idx).cast(), old_version.capacity() - old_head_idx),
+                        slice::from_raw_parts(
+                            old_version.thin_ptr().add(old_head_idx).cast(),
+                            old_version.capacity() - old_head_idx,
+                        ),
                         slice::from_raw_parts(old_version.thin_ptr().cast(), old_tail_idx),
                     )
                 }
@@ -363,13 +383,13 @@ impl<T, AtomicU32Wrapper, AtomicU64Wrapper> SPMCUnboundedQueue<T, AtomicU32Wrapp
             unsafe { cached_version.thin_mut_ptr() }.cast::<T>(),
             head,
             src_right,
-            &cached_version
+            &cached_version,
         );
         tail = Self::copy_slice(
             unsafe { cached_version.thin_mut_ptr() }.cast::<T>(),
             tail,
             src_left,
-            &cached_version
+            &cached_version,
         );
 
         *self.last_version.write() = new_version;
@@ -385,16 +405,25 @@ impl<T, AtomicU32Wrapper, AtomicU64Wrapper> SPMCUnboundedQueue<T, AtomicU32Wrapp
     /// and the provided capacity should be more than the current capacity,
     /// and less than u32::MAX and be a power of two.
     unsafe fn producer_reserve(&self, new_capacity: usize, version: &mut CachedVersion<T>) {
-        debug_assert!(new_capacity > version.capacity(), "new_capacity should be more than version.capacity()");
-        debug_assert!(new_capacity <= u32::MAX as usize, "new_capacity should be less than u32::MAX");
-        debug_assert!(new_capacity.is_power_of_two(), "new_capacity should be power of two");
+        debug_assert!(
+            new_capacity > version.capacity(),
+            "new_capacity should be more than version.capacity()"
+        );
+        debug_assert!(
+            new_capacity <= u32::MAX as usize,
+            "new_capacity should be less than u32::MAX"
+        );
+        debug_assert!(
+            new_capacity.is_power_of_two(),
+            "new_capacity should be power of two"
+        );
 
         let tail = unsafe { self.unsync_load_tail() }; // only producer can change tail
         let (cached_version, tail) = self.create_new_version_and_write_it_but_not_update_tail(
             self.head.load(Acquire),
             tail,
             new_capacity,
-            version
+            version,
         );
 
         self.tail_and_version
@@ -428,13 +457,13 @@ impl<T, AtomicU32Wrapper, AtomicU64Wrapper> SPMCUnboundedQueue<T, AtomicU32Wrapp
                     // We are the only producer,
                     // so we can don't worry
                     // about someone overwriting the value before we read it
-                    return Some(
+                    return Some(unsafe {
                         version
                             .thin_ptr()
                             .add((head & version.mask()) as usize)
                             .read()
-                            .assume_init(),
-                    );
+                            .assume_init()
+                    });
                 }
                 Err(new_head) => {
                     head = new_head;
@@ -450,7 +479,11 @@ impl<T, AtomicU32Wrapper, AtomicU64Wrapper> SPMCUnboundedQueue<T, AtomicU32Wrapp
     ///
     /// The called should be the only producer.
     #[inline]
-    unsafe fn producer_pop_many(&self, dst: &mut [MaybeUninit<T>], version: &CachedVersion<T>) -> usize {
+    unsafe fn producer_pop_many(
+        &self,
+        dst: &mut [MaybeUninit<T>],
+        version: &CachedVersion<T>,
+    ) -> usize {
         // The producer always has the latest version.
 
         let mut head = self.head.load(Acquire);
@@ -484,11 +517,7 @@ impl<T, AtomicU32Wrapper, AtomicU64Wrapper> SPMCUnboundedQueue<T, AtomicU32Wrapp
                     if n <= right {
                         // No wraparound, copy in one shot
                         unsafe {
-                            ptr::copy_nonoverlapping(
-                                version.thin_ptr().add(head_idx),
-                                dst_ptr,
-                                n,
-                            );
+                            ptr::copy_nonoverlapping(version.thin_ptr().add(head_idx), dst_ptr, n);
                         }
                     } else {
                         unsafe {
@@ -532,7 +561,10 @@ impl<T, AtomicU32Wrapper, AtomicU64Wrapper> SPMCUnboundedQueue<T, AtomicU32Wrapp
                 .write(MaybeUninit::new(value));
         }
 
-        self.tail_and_version.store(pack_version_and_tail(version.id, tail.wrapping_add(1)), Release);
+        self.tail_and_version.store(
+            pack_version_and_tail(version.id, tail.wrapping_add(1)),
+            Release,
+        );
     }
 
     /// Updates the version and resizes the queue to the capacity * 2.
@@ -541,7 +573,7 @@ impl<T, AtomicU32Wrapper, AtomicU64Wrapper> SPMCUnboundedQueue<T, AtomicU32Wrapp
     /// # Safety
     ///
     /// The called should be the only producer.
-    #[inline(always)]
+    #[inline(never)]
     #[cold]
     unsafe fn handle_overflow(
         &self,
@@ -555,10 +587,23 @@ impl<T, AtomicU32Wrapper, AtomicU64Wrapper> SPMCUnboundedQueue<T, AtomicU32Wrapp
             new_capacity *= 2;
         }
 
-        let (cached_version, tail) = self.create_new_version_and_write_it_but_not_update_tail(head, tail, new_capacity, version);
+        let (cached_version, tail) = self.create_new_version_and_write_it_but_not_update_tail(
+            head,
+            tail,
+            new_capacity,
+            version,
+        );
 
-        let new_tail = Self::copy_slice(cached_version.thin_mut_ptr().cast(), tail, values, &cached_version);
-        self.tail_and_version.store(pack_version_and_tail(cached_version.id(), new_tail), Release);
+        let new_tail = Self::copy_slice(
+            unsafe { cached_version.thin_mut_ptr().cast() },
+            tail,
+            values,
+            &cached_version,
+        );
+        self.tail_and_version.store(
+            pack_version_and_tail(cached_version.id(), new_tail),
+            Release,
+        );
 
         // Here we don't need the previous version anymore.
         *version = cached_version;
@@ -571,16 +616,12 @@ impl<T, AtomicU32Wrapper, AtomicU64Wrapper> SPMCUnboundedQueue<T, AtomicU32Wrapp
     ///
     /// The called should be the only producer.
     #[inline]
-    unsafe fn producer_push(
-        &self,
-        value: T,
-        version: &mut CachedVersion<T>,
-    ) {
+    unsafe fn producer_push(&self, value: T, version: &mut CachedVersion<T>) {
         let head = self.head.load(Acquire);
         let tail = unsafe { self.unsync_load_tail() }; // only producer can change tail
 
         if unlikely(Self::len(head, tail) == version.capacity()) {
-            self.handle_overflow(head, tail, version, &[value]);
+            unsafe { self.handle_overflow(head, tail, version, &[value]) };
 
             return;
         }
@@ -594,7 +635,12 @@ impl<T, AtomicU32Wrapper, AtomicU64Wrapper> SPMCUnboundedQueue<T, AtomicU32Wrapp
     ///
     /// The called should be the only producer and the space is enough.
     #[inline]
-    unsafe fn producer_push_many_unchecked(&self, first: &[T], last: &[T], version: &CachedVersion<T>) {
+    unsafe fn producer_push_many_unchecked(
+        &self,
+        first: &[T],
+        last: &[T],
+        version: &CachedVersion<T>,
+    ) {
         if cfg!(debug_assertions) {
             let head = self.head.load(Acquire);
             let tail = unsafe { self.unsync_load_tail() }; // only producer can change tail
@@ -606,10 +652,21 @@ impl<T, AtomicU32Wrapper, AtomicU64Wrapper> SPMCUnboundedQueue<T, AtomicU32Wrapp
 
         let mut tail = unsafe { self.unsync_load_tail() }; // only producer can change tail
 
-        tail = Self::copy_slice(version.thin_mut_ptr().cast(), tail, first, version);
-        tail = Self::copy_slice(version.thin_mut_ptr().cast(), tail, last, version);
+        tail = Self::copy_slice(
+            unsafe { version.thin_mut_ptr().cast() },
+            tail,
+            first,
+            version,
+        );
+        tail = Self::copy_slice(
+            unsafe { version.thin_mut_ptr().cast() },
+            tail,
+            last,
+            version,
+        );
 
-        self.tail_and_version.store(pack_version_and_tail(version.id(), tail), Release);
+        self.tail_and_version
+            .store(pack_version_and_tail(version.id(), tail), Release);
     }
 
     /// Pushes many values to the queue.
@@ -618,29 +675,34 @@ impl<T, AtomicU32Wrapper, AtomicU64Wrapper> SPMCUnboundedQueue<T, AtomicU32Wrapp
     ///
     /// The called should be the only producer.
     #[inline]
-    unsafe fn producer_push_many(
-        &self,
-        slice: &[T],
-        version: &mut CachedVersion<T>,
-    ) {
+    unsafe fn producer_push_many(&self, slice: &[T], version: &mut CachedVersion<T>) {
         let head = self.head.load(Acquire);
         let mut tail = unsafe { self.unsync_load_tail() }; // only producer can change tail
 
         if unlikely(Self::len(head, tail) + slice.len() > version.capacity()) {
-            self.handle_overflow(head, tail, version, slice);
+            unsafe { self.handle_overflow(head, tail, version, slice) };
 
             return;
         }
 
-        tail = Self::copy_slice(version.thin_mut_ptr().cast(), tail, slice, version);
+        tail = Self::copy_slice(
+            unsafe { version.thin_mut_ptr().cast() },
+            tail,
+            slice,
+            version,
+        );
 
-        self.tail_and_version.store(pack_version_and_tail(version.id(), tail), Release);
+        self.tail_and_version
+            .store(pack_version_and_tail(version.id(), tail), Release);
     }
 }
 
 // Consumers
-impl<T, AtomicU32Wrapper, AtomicU64Wrapper> SPMCUnboundedQueue<T, AtomicU32Wrapper, AtomicU64Wrapper>
-    where AtomicU32Wrapper: Deref<Target = AtomicU32> + Default, AtomicU64Wrapper: Deref<Target = AtomicU64> + Default
+impl<T, AtomicU32Wrapper, AtomicU64Wrapper>
+    SPMCUnboundedQueue<T, AtomicU32Wrapper, AtomicU64Wrapper>
+where
+    AtomicU32Wrapper: Deref<Target = AtomicU32> + Default,
+    AtomicU64Wrapper: Deref<Target = AtomicU64> + Default,
 {
     /// Returns the capacity of the queue.
     #[inline]
@@ -679,26 +741,26 @@ impl<T, AtomicU32Wrapper, AtomicU64Wrapper> SPMCUnboundedQueue<T, AtomicU32Wrapp
                 if unlikely(last_version_id == version.id()) {
                     // Case 1, we can retry.
                     continue;
-                } else {
-                    let was_updated = self.update_version(version);
-                    if unlikely(!was_updated) {
-                        // We can't reliably return the length in this situation.
-                        // But it is not a problem.
-                        // This method can be used for two purposes:
-                        // 1. In tests to check if all values were pushed;
-                        // 2. To check if the queue is empty -> the reading is possible.
-                        //
-                        // The first case is impossible, because not to fail test accidentally,
-                        // this method can be called
-                        // only when concurrent work with the queue is impossible;
-                        // therefore, in this case we can't be here
-                        // (the update_version method always returns `true`
-                        // without the concurrent work).
-                        //
-                        // For the second case, we can return zero,
-                        // because the reading is impossible.
-                        return 0;
-                    }
+                }
+
+                let was_updated = self.update_version(version);
+                if unlikely(!was_updated) {
+                    // We can't reliably return the length in this situation.
+                    // But it is not a problem.
+                    // This method can be used for two purposes:
+                    // 1. In tests to check if all values were pushed;
+                    // 2. To check if the queue is empty -> the reading is possible.
+                    //
+                    // The first case is impossible, because not to fail test accidentally,
+                    // this method can be called
+                    // only when concurrent work with the queue is impossible;
+                    // therefore, in this case we can't be here
+                    // (the update_version method always returns `true`
+                    // without the concurrent work).
+                    //
+                    // For the second case, we can return zero,
+                    // because the reading is impossible.
+                    return 0;
                 }
             }
 
@@ -712,7 +774,11 @@ impl<T, AtomicU32Wrapper, AtomicU64Wrapper> SPMCUnboundedQueue<T, AtomicU32Wrapp
     /// It can return zero even if the queue is not empty,
     /// if the producer is preempted while pushing.
     #[inline]
-    fn consumer_pop_many(&self, dst: &mut [MaybeUninit<T>], version: &mut CachedVersion<T>) -> usize {
+    fn consumer_pop_many(
+        &self,
+        dst: &mut [MaybeUninit<T>],
+        version: &mut CachedVersion<T>,
+    ) -> usize {
         let mut head = self.head.load(Acquire);
 
         // The thread can be preempted here,
@@ -767,20 +833,12 @@ impl<T, AtomicU32Wrapper, AtomicU64Wrapper> SPMCUnboundedQueue<T, AtomicU32Wrapp
             if n <= right {
                 // No wraparound, copy in one shot
                 unsafe {
-                    ptr::copy_nonoverlapping(
-                        version.thin_mut_ptr().add(head_idx),
-                        dst_ptr,
-                        n,
-                    );
+                    ptr::copy_nonoverlapping(version.thin_mut_ptr().add(head_idx), dst_ptr, n);
                 }
             } else {
                 unsafe {
                     // Wraparound: copy right half then left half
-                    ptr::copy_nonoverlapping(
-                        version.thin_ptr().add(head_idx),
-                        dst_ptr,
-                        right,
-                    );
+                    ptr::copy_nonoverlapping(version.thin_ptr().add(head_idx), dst_ptr, right);
                     ptr::copy_nonoverlapping(version.thin_ptr(), dst_ptr.add(right), n - right);
                 }
             }
@@ -818,7 +876,12 @@ impl<T, AtomicU32Wrapper, AtomicU64Wrapper> SPMCUnboundedQueue<T, AtomicU32Wrapp
     ///
     /// It can return zero even if the source queue is not empty,
     /// if the producer is preempted while pushing.
-    fn steal_into(&self, dst: &Self, src_version: &mut CachedVersion<T>, dst_version: &mut CachedVersion<T>) -> usize {
+    fn steal_into(
+        &self,
+        dst: &Self,
+        src_version: &mut CachedVersion<T>,
+        dst_version: &mut CachedVersion<T>,
+    ) -> usize {
         let mut src_head = self.head.load(Acquire);
         let (mut src_last_version_id, mut src_tail) = self.sync_load_version_and_tail(Acquire);
         let dst_tail = unsafe { dst.unsync_load_tail() }; // only producer can change tail
@@ -832,14 +895,14 @@ impl<T, AtomicU32Wrapper, AtomicU64Wrapper> SPMCUnboundedQueue<T, AtomicU32Wrapp
             );
         }
 
-       loop {
+        loop {
             if unlikely(src_version.id() < src_last_version_id) {
-               if unlikely(!self.update_version(src_version)) {
-                   // We can't reliably calculate the length in this situation.
-                   return 0;
-               }
+                if unlikely(!self.update_version(src_version)) {
+                    // We can't reliably calculate the length in this situation.
+                    return 0;
+                }
 
-               continue;
+                continue;
             }
 
             let n = Self::len(src_head, src_tail) / 2;
@@ -888,13 +951,13 @@ impl<T, AtomicU32Wrapper, AtomicU64Wrapper> SPMCUnboundedQueue<T, AtomicU32Wrapp
                 unsafe { dst_version.thin_mut_ptr() }.cast::<T>(),
                 dst_tail,
                 src_right,
-                dst_version
+                dst_version,
             );
             Self::copy_slice(
                 unsafe { dst_version.thin_mut_ptr() }.cast::<T>(),
                 dst_tail.wrapping_add(src_right.len() as u32),
                 src_left,
-                dst_version
+                dst_version,
             );
 
             let res = self.head.compare_exchange(
@@ -907,9 +970,10 @@ impl<T, AtomicU32Wrapper, AtomicU64Wrapper> SPMCUnboundedQueue<T, AtomicU32Wrapp
             match res {
                 Ok(_) => {
                     // Success, we can move dst tail and return
-                    dst
-                        .tail_and_version
-                        .store(pack_version_and_tail(dst_version.id(), dst_tail.wrapping_add(n as u32)), Release);
+                    dst.tail_and_version.store(
+                        pack_version_and_tail(dst_version.id(), dst_tail.wrapping_add(n as u32)),
+                        Release,
+                    );
 
                     return n;
                 }
@@ -925,13 +989,27 @@ impl<T, AtomicU32Wrapper, AtomicU64Wrapper> SPMCUnboundedQueue<T, AtomicU32Wrapp
     }
 }
 
-unsafe impl<T, AtomicU32Wrapper, AtomicU64Wrapper> Send for SPMCUnboundedQueue<T, AtomicU32Wrapper, AtomicU64Wrapper>
-    where AtomicU32Wrapper: Deref<Target = AtomicU32> + Default, AtomicU64Wrapper: Deref<Target = AtomicU64> + Default {}
-unsafe impl<T, AtomicU32Wrapper, AtomicU64Wrapper> Sync for SPMCUnboundedQueue<T, AtomicU32Wrapper, AtomicU64Wrapper>
-    where AtomicU32Wrapper: Deref<Target = AtomicU32> + Default, AtomicU64Wrapper: Deref<Target = AtomicU64> + Default {}
+unsafe impl<T, AtomicU32Wrapper, AtomicU64Wrapper> Send
+    for SPMCUnboundedQueue<T, AtomicU32Wrapper, AtomicU64Wrapper>
+where
+    AtomicU32Wrapper: Deref<Target = AtomicU32> + Default,
+    AtomicU64Wrapper: Deref<Target = AtomicU64> + Default,
+{
+}
+unsafe impl<T, AtomicU32Wrapper, AtomicU64Wrapper> Sync
+    for SPMCUnboundedQueue<T, AtomicU32Wrapper, AtomicU64Wrapper>
+where
+    AtomicU32Wrapper: Deref<Target = AtomicU32> + Default,
+    AtomicU64Wrapper: Deref<Target = AtomicU64> + Default,
+{
+}
 
-impl<T, AtomicU32Wrapper, AtomicU64Wrapper> Drop for SPMCUnboundedQueue<T, AtomicU32Wrapper, AtomicU64Wrapper>
-where AtomicU32Wrapper: Deref<Target = AtomicU32> + Default, AtomicU64Wrapper: Deref<Target = AtomicU64> + Default {
+impl<T, AtomicU32Wrapper, AtomicU64Wrapper> Drop
+    for SPMCUnboundedQueue<T, AtomicU32Wrapper, AtomicU64Wrapper>
+where
+    AtomicU32Wrapper: Deref<Target = AtomicU32> + Default,
+    AtomicU64Wrapper: Deref<Target = AtomicU64> + Default,
+{
     fn drop(&mut self) {
         // While dropping there is no concurrency
 
@@ -946,7 +1024,7 @@ where AtomicU32Wrapper: Deref<Target = AtomicU32> + Default, AtomicU64Wrapper: D
                         version
                             .thin_mut_ptr()
                             .add((head & version.mask()) as usize)
-                            .cast::<T>()
+                            .cast::<T>(),
                     );
                 }
 
@@ -973,7 +1051,10 @@ macro_rules! generate_spmc_producer_and_consumer {
             /// The provided capacity must be greater than the current capacity,
             /// less than `u32::MAX` and be a power of two.
             pub fn reserve(&mut self, capacity: usize) {
-                unsafe { self.inner.producer_reserve(capacity, &mut self.cached_version) };
+                unsafe {
+                    self.inner
+                        .producer_reserve(capacity, &mut self.cached_version)
+                };
             }
         }
 
@@ -997,7 +1078,7 @@ macro_rules! generate_spmc_producer_and_consumer {
             #[inline]
             fn maybe_push(&mut self, value: T) -> Result<(), T> {
                 unsafe { self.inner.producer_push(value, &mut self.cached_version) };
-                
+
                 Ok(())
             }
 
@@ -1013,13 +1094,19 @@ macro_rules! generate_spmc_producer_and_consumer {
 
             #[inline]
             unsafe fn push_many_unchecked(&mut self, first: &[T], last: &[T]) {
-                unsafe { self.inner.producer_push_many_unchecked(first, last, &self.cached_version) }
+                unsafe {
+                    self.inner
+                        .producer_push_many_unchecked(first, last, &self.cached_version)
+                }
             }
 
             #[inline]
             fn maybe_push_many(&mut self, slice: &[T]) -> Result<(), ()> {
-                unsafe { self.inner.producer_push_many(slice, &mut self.cached_version) };
-                
+                unsafe {
+                    self.inner
+                        .producer_push_many(slice, &mut self.cached_version)
+                };
+
                 Ok(())
             }
 
@@ -1029,10 +1116,13 @@ macro_rules! generate_spmc_producer_and_consumer {
                 slice: &[T],
                 _sync_batch_receiver: &SBR,
             ) {
-                unsafe { self.inner.producer_push_many(slice, &mut self.cached_version) };
+                unsafe {
+                    self.inner
+                        .producer_push_many(slice, &mut self.cached_version)
+                };
             }
         }
-        
+
         unsafe impl<T: Send> Sync for $producer_name<T> {}
         unsafe impl<T: Send> Send for $producer_name<T> {}
 
@@ -1063,7 +1153,11 @@ macro_rules! generate_spmc_producer_and_consumer {
 
             #[inline]
             fn steal_into(&mut self, dst: &mut Self::AssociatedProducer) -> usize {
-                self.inner.steal_into(&*dst.inner, &mut self.cached_version, &mut dst.cached_version)
+                self.inner.steal_into(
+                    &*dst.inner,
+                    &mut self.cached_version,
+                    &mut dst.cached_version,
+                )
             }
         }
 
@@ -1076,7 +1170,7 @@ macro_rules! generate_spmc_producer_and_consumer {
                 }
             }
         }
-        
+
         unsafe impl<T: Send> Send for $consumer_name<T> {}
     };
 
@@ -1206,8 +1300,8 @@ generate_spmc_producer_and_consumer!(
 /// ```
 pub fn new_cache_padded_unbounded<T>() -> (
     CachePaddedSPMCUnboundedProducer<T>,
-    CachePaddedSPMCUnboundedConsumer<T>
-)  {
+    CachePaddedSPMCUnboundedConsumer<T>,
+) {
     let queue = LightArc::new(SPMCUnboundedQueue::new());
     let version = queue.last_version.try_read().unwrap().clone();
 
@@ -1219,16 +1313,16 @@ pub fn new_cache_padded_unbounded<T>() -> (
         CachePaddedSPMCUnboundedConsumer {
             cached_version: CachedVersion::from_arc_version(version),
             inner: queue,
-            _non_sync: PhantomData
+            _non_sync: PhantomData,
         },
     )
 }
 
 #[cfg(test)]
 mod tests {
-    use std::collections::VecDeque;
     use super::*;
     use crate::mutex_vec_queue::MutexVecQueue;
+    use std::collections::VecDeque;
 
     const N: usize = 16000;
     const BATCH_SIZE: usize = 10;

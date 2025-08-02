@@ -5,7 +5,6 @@ use std::sync::{self, RwLockReadGuard, RwLockWriteGuard, TryLockError};
 #[derive(Debug)]
 pub struct RwLock<T: ?Sized>(sync::RwLock<T>);
 
-#[allow(dead_code)]
 impl<T> RwLock<T> {
     #[inline]
     pub(crate) fn new(t: T) -> Self {
@@ -14,7 +13,7 @@ impl<T> RwLock<T> {
 
     #[inline]
     pub(crate) fn read(&self) -> RwLockReadGuard<'_, T> {
-        self.0.read().unwrap_or_else(|p_err| p_err.into_inner())
+        self.0.read().unwrap_or_else(sync::PoisonError::into_inner)
     }
 
     #[inline]
@@ -28,7 +27,7 @@ impl<T> RwLock<T> {
 
     #[inline]
     pub(crate) fn write(&self) -> RwLockWriteGuard<'_, T> {
-        self.0.write().unwrap_or_else(|p_err| p_err.into_inner())
+        self.0.write().unwrap_or_else(sync::PoisonError::into_inner)
     }
 
     #[inline]

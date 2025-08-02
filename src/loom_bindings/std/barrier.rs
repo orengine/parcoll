@@ -79,8 +79,8 @@ impl Barrier {
     /// let barrier = Barrier::new(10);
     /// ```
     #[must_use]
-    pub(crate) fn new(n: usize) -> Barrier {
-        Barrier {
+    pub(crate) fn new(n: usize) -> Self {
+        Self {
             lock: Mutex::new(BarrierState {
                 count: 0,
                 generation_id: 0,
@@ -126,18 +126,25 @@ impl Barrier {
     pub(crate) fn wait(&self) -> BarrierWaitResult {
         let mut lock = self.lock.lock();
         let local_gen = lock.generation_id;
+
         lock.count += 1;
+
         if lock.count < self.num_threads {
             // We need a while loop to guard against spurious wakeups.
             // https://en.wikipedia.org/wiki/Spurious_wakeup
             while local_gen == lock.generation_id {
                 lock = self.cvar.wait(lock).unwrap();
             }
+
             BarrierWaitResult(false)
         } else {
             lock.count = 0;
             lock.generation_id = lock.generation_id.wrapping_add(1);
+
+            drop(lock);
+
             self.cvar.notify_all();
+
             BarrierWaitResult(true)
         }
     }
@@ -156,31 +163,39 @@ impl Barrier {
                 break guard;
             } else if Instant::now() > deadline {
                 return None;
-            } else {
-                std::thread::yield_now();
             }
+
+            std::thread::yield_now();
         };
 
         // Shrink the `timeout` to account for the time taken to acquire `lock`.
         let timeout = deadline.saturating_duration_since(Instant::now());
-
         let local_gen = lock.generation_id;
+
         lock.count += 1;
+
         if lock.count < self.num_threads {
             // We need a while loop to guard against spurious wakeups.
             // https://en.wikipedia.org/wiki/Spurious_wakeup
             while local_gen == lock.generation_id {
                 let (guard, timeout_result) = self.cvar.wait_timeout(lock, timeout).unwrap();
+
                 lock = guard;
+
                 if timeout_result.timed_out() {
                     return None;
                 }
             }
+
             Some(BarrierWaitResult(false))
         } else {
             lock.count = 0;
             lock.generation_id = lock.generation_id.wrapping_add(1);
+
+            drop(lock);
+
             self.cvar.notify_all();
+
             Some(BarrierWaitResult(true))
         }
     }

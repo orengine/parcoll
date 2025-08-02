@@ -27,7 +27,7 @@ impl AtomicUsize {
     /// All mutations must have happened before the unsynchronized load.
     /// Additionally, there must be no concurrent mutations.
     pub unsafe fn unsync_load(&self) -> usize {
-        core::ptr::read(self.inner.get() as *const usize)
+        unsafe { core::ptr::read(self.inner.get() as *const usize) }
     }
 
     pub fn with_mut<R>(&mut self, f: impl FnOnce(&mut usize) -> R) -> R {
@@ -89,7 +89,7 @@ impl AtomicIsize {
     /// All mutations must have happened before the unsynchronized load.
     /// Additionally, there must be no concurrent mutations.
     pub unsafe fn unsync_load(&self) -> isize {
-        core::ptr::read(self.inner.get() as *const isize)
+        unsafe { core::ptr::read(self.inner.get() as *const isize) }
     }
 
     pub fn with_mut<R>(&mut self, f: impl FnOnce(&mut isize) -> R) -> R {

@@ -1,30 +1,29 @@
 //! Provides cache-padded atomic types.
+use crate::loom_bindings::sync::atomic::{
+    AtomicI8, AtomicI16, AtomicI32, AtomicI64, AtomicIsize, AtomicU8, AtomicU16, AtomicU32,
+    AtomicU64, AtomicUsize,
+};
 use core::ops::Deref;
 use std::mem::MaybeUninit;
 use std::ops::DerefMut;
-use crate::loom_bindings::sync::atomic::{AtomicI16, AtomicI32, AtomicI64, AtomicI8, AtomicIsize, AtomicU16, AtomicU32, AtomicU64, AtomicU8, AtomicUsize};
 
-#[cfg(
-    any(
-        target_arch = "x86_64",
-        target_arch = "aarch64",
-        target_arch = "arm64ec",
-        target_arch = "powerpc64",
-    )
-)]
+#[cfg(any(
+    target_arch = "x86_64",
+    target_arch = "aarch64",
+    target_arch = "arm64ec",
+    target_arch = "powerpc64",
+))]
 const ALIGN: usize = 128;
 
-#[cfg(
-    any(
-        target_arch = "arm",
-        target_arch = "mips",
-        target_arch = "mips32r6",
-        target_arch = "mips64",
-        target_arch = "mips64r6",
-        target_arch = "sparc",
-        target_arch = "hexagon",
-    )
-)]
+#[cfg(any(
+    target_arch = "arm",
+    target_arch = "mips",
+    target_arch = "mips32r6",
+    target_arch = "mips64",
+    target_arch = "mips64r6",
+    target_arch = "sparc",
+    target_arch = "hexagon",
+))]
 const ALIGN: usize = 32;
 
 #[cfg(target_arch = "m68k")]
@@ -33,23 +32,21 @@ const ALIGN: usize = 16;
 #[cfg(target_arch = "s390x")]
 const ALIGN: usize = 256;
 
-#[cfg(
-    not(any(
-        target_arch = "x86_64",
-        target_arch = "aarch64",
-        target_arch = "arm64ec",
-        target_arch = "powerpc64",
-        target_arch = "arm",
-        target_arch = "mips",
-        target_arch = "mips32r6",
-        target_arch = "mips64",
-        target_arch = "mips64r6",
-        target_arch = "sparc",
-        target_arch = "hexagon",
-        target_arch = "m68k",
-        target_arch = "s390x",
-    ))
-)]
+#[cfg(not(any(
+    target_arch = "x86_64",
+    target_arch = "aarch64",
+    target_arch = "arm64ec",
+    target_arch = "powerpc64",
+    target_arch = "arm",
+    target_arch = "mips",
+    target_arch = "mips32r6",
+    target_arch = "mips64",
+    target_arch = "mips64r6",
+    target_arch = "sparc",
+    target_arch = "hexagon",
+    target_arch = "m68k",
+    target_arch = "s390x",
+)))]
 const ALIGN: usize = 64;
 
 macro_rules! generate_cache_padded_atomic {
@@ -57,7 +54,13 @@ macro_rules! generate_cache_padded_atomic {
         /// Cache padded atomic. Can be dereferenced to the inner atomic.
         pub struct $name {
             atomic: $atomic,
-            _align: MaybeUninit<[u8; if size_of::<$atomic>() > ALIGN { 0 } else { ALIGN - size_of::<$atomic>() }]>,
+            _align: MaybeUninit<
+                [u8; if size_of::<$atomic>() > ALIGN {
+                    0
+                } else {
+                    ALIGN - size_of::<$atomic>()
+                }],
+            >,
         }
 
         impl $name {

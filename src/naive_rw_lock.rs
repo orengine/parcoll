@@ -1,19 +1,22 @@
 //! This module provides [`NaiveRWLock`] and its guards.
-use std::cell::UnsafeCell;
-use std::ops::{Deref, DerefMut};
-use std::sync::atomic::Ordering;
 use crate::backoff::Backoff;
 use crate::loom_bindings::sync::atomic::AtomicI32;
 use crate::number_types::NonCachePaddedAtomicI32;
+use std::cell::UnsafeCell;
+use std::ops::{Deref, DerefMut};
+use std::sync::atomic::Ordering;
 
 /// A RAII read guard for a [`NaiveRWLock`].
 pub struct NaiveRWLockReadGuard<'rw_lock, T, AtomicWrapper = NonCachePaddedAtomicI32>
-where  AtomicWrapper: Deref<Target = AtomicI32> + Default
+where
+    AtomicWrapper: Deref<Target = AtomicI32> + Default,
 {
     rw_lock: &'rw_lock NaiveRWLock<T, AtomicWrapper>,
 }
 
-impl<'rw_lock, T, AtomicWrapper: Deref<Target = AtomicI32> + Default> Deref for NaiveRWLockReadGuard<'rw_lock, T, AtomicWrapper> {
+impl<T, AtomicWrapper: Deref<Target = AtomicI32> + Default> Deref
+    for NaiveRWLockReadGuard<'_, T, AtomicWrapper>
+{
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
@@ -21,7 +24,9 @@ impl<'rw_lock, T, AtomicWrapper: Deref<Target = AtomicI32> + Default> Deref for 
     }
 }
 
-impl<'rw_lock, T, AtomicWrapper: Deref<Target = AtomicI32> + Default> Drop for NaiveRWLockReadGuard<'rw_lock, T, AtomicWrapper> {
+impl<T, AtomicWrapper: Deref<Target = AtomicI32> + Default> Drop
+    for NaiveRWLockReadGuard<'_, T, AtomicWrapper>
+{
     fn drop(&mut self) {
         self.rw_lock.state.fetch_sub(1, Ordering::Release);
     }
@@ -29,12 +34,15 @@ impl<'rw_lock, T, AtomicWrapper: Deref<Target = AtomicI32> + Default> Drop for N
 
 /// A RAII write guard for a [`NaiveRWLock`].
 pub struct NaiveRWLockWriteGuard<'rw_lock, T, AtomicWrapper = NonCachePaddedAtomicI32>
-where AtomicWrapper: Deref<Target = AtomicI32> + Default
+where
+    AtomicWrapper: Deref<Target = AtomicI32> + Default,
 {
     rw_lock: &'rw_lock NaiveRWLock<T, AtomicWrapper>,
 }
 
-impl<'rw_lock, T, AtomicWrapper: Deref<Target = AtomicI32> + Default> Deref for NaiveRWLockWriteGuard<'rw_lock, T, AtomicWrapper> {
+impl<T, AtomicWrapper: Deref<Target = AtomicI32> + Default> Deref
+    for NaiveRWLockWriteGuard<'_, T, AtomicWrapper>
+{
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
@@ -42,13 +50,17 @@ impl<'rw_lock, T, AtomicWrapper: Deref<Target = AtomicI32> + Default> Deref for 
     }
 }
 
-impl<'rw_lock, T, AtomicWrapper: Deref<Target = AtomicI32> + Default> DerefMut for NaiveRWLockWriteGuard<'rw_lock, T, AtomicWrapper> {
+impl<T, AtomicWrapper: Deref<Target = AtomicI32> + Default> DerefMut
+    for NaiveRWLockWriteGuard<'_, T, AtomicWrapper>
+{
     fn deref_mut(&mut self) -> &mut Self::Target {
         unsafe { &mut *self.rw_lock.data.get() }
     }
 }
 
-impl<'rw_lock, T, AtomicWrapper: Deref<Target = AtomicI32> + Default> Drop for NaiveRWLockWriteGuard<'rw_lock, T, AtomicWrapper> {
+impl<T, AtomicWrapper: Deref<Target = AtomicI32> + Default> Drop
+    for NaiveRWLockWriteGuard<'_, T, AtomicWrapper>
+{
     fn drop(&mut self) {
         self.rw_lock.state.store(0, Ordering::Release);
     }
@@ -57,7 +69,10 @@ impl<'rw_lock, T, AtomicWrapper: Deref<Target = AtomicI32> + Default> Drop for N
 /// A naive read-write lock.
 /// It can when and only when write operations are rare.
 /// In this case it works much faster than [`std::sync::RwLock`].
-pub struct NaiveRWLock<T, AtomicWrapper: Deref<Target = AtomicI32> + Default = NonCachePaddedAtomicI32> {
+pub struct NaiveRWLock<
+    T,
+    AtomicWrapper: Deref<Target = AtomicI32> + Default = NonCachePaddedAtomicI32,
+> {
     state: AtomicWrapper,
     data: UnsafeCell<T>,
 }
@@ -65,7 +80,7 @@ pub struct NaiveRWLock<T, AtomicWrapper: Deref<Target = AtomicI32> + Default = N
 impl<T, AtomicWrapper: Deref<Target = AtomicI32> + Default> NaiveRWLock<T, AtomicWrapper> {
     /// Creates a new [`NaiveRWLock`] with the given data.
     pub fn new(data: T) -> Self {
-        NaiveRWLock {
+        Self {
             state: AtomicWrapper::default(),
             data: UnsafeCell::new(data),
         }
@@ -99,12 +114,10 @@ impl<T, AtomicWrapper: Deref<Target = AtomicI32> + Default> NaiveRWLock<T, Atomi
         let backoff = Backoff::new();
 
         loop {
-            match self.state.compare_exchange(
-                0,
-                -1,
-                Ordering::Acquire,
-                Ordering::Relaxed,
-            ) {
+            match self
+                .state
+                .compare_exchange(0, -1, Ordering::Acquire, Ordering::Relaxed)
+            {
                 Ok(_) => return NaiveRWLockWriteGuard { rw_lock: self },
                 Err(_) => backoff.snooze(),
             }

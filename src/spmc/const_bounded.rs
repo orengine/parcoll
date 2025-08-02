@@ -2,17 +2,19 @@
 //!
 //! It is implemented as a const bounded ring buffer.
 //! It is optimized for the work-stealing model.
-
+#![allow(clippy::cast_possible_truncation, reason = "LongNumber should be synonymous to usize")]
 use crate::hints::unlikely;
+use crate::light_arc::LightArc;
+use crate::number_types::{
+    CachePaddedLongAtomic, LongAtomic, LongNumber, NotCachePaddedLongAtomic,
+};
 use crate::spmc::{Consumer, Producer};
 use crate::sync_batch_receiver::SyncBatchReceiver;
-use std::mem::{needs_drop, MaybeUninit};
+use std::marker::PhantomData;
+use std::mem::{MaybeUninit, needs_drop};
 use std::ops::Deref;
 use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
 use std::{ptr, slice};
-use std::marker::PhantomData;
-use crate::light_arc::LightArc;
-use crate::number_types::{CachePaddedLongAtomic, LongAtomic, LongNumber, NotCachePaddedLongAtomic};
 
 // Don't care about ABA because we can count that 16-bit and 32-bit processors never
 // insert + read (2 ^ 16) - 1 or (2 ^ 32) - 1 values while some consumer are preempted.
@@ -70,9 +72,7 @@ impl<T, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> + Defau
         debug_assert!(size_of::<MaybeUninit<T>>() == size_of::<T>()); // Assume that we can just cast it
 
         Self {
-            buffer: Box::into_raw(Box::new(
-                [const { MaybeUninit::uninit() }; CAPACITY],
-            )),
+            buffer: Box::into_raw(Box::new([const { MaybeUninit::uninit() }; CAPACITY])),
             tail: AtomicWrapper::default(),
             head: AtomicWrapper::default(),
         }
@@ -111,11 +111,7 @@ impl<T, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> + Defau
 
         if tail_idx + slice.len() <= CAPACITY {
             unsafe {
-                ptr::copy_nonoverlapping(
-                    slice.as_ptr(),
-                    buffer_ptr.add(tail_idx),
-                    slice.len(),
-                )
+                ptr::copy_nonoverlapping(slice.as_ptr(), buffer_ptr.add(tail_idx), slice.len());
             };
         } else {
             let right = CAPACITY - tail_idx;
@@ -169,13 +165,12 @@ impl<T, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> + Defau
                 Ok(_) => {
                     // We are the only producer,
                     // so we can don't worry about someone overwriting the value before we read it
-                    return Some(
-                        self
-                            .buffer_thin_ptr()
+                    return Some(unsafe {
+                        self.buffer_thin_ptr()
                             .add(head as usize % CAPACITY)
                             .read()
-                            .assume_init(),
-                    );
+                            .assume_init()
+                    });
                 }
                 Err(new_head) => {
                     head = new_head;
@@ -261,8 +256,7 @@ impl<T, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> + Defau
     #[inline(always)]
     pub unsafe fn push_unchecked(&self, value: T, tail: LongNumber) {
         unsafe {
-            self
-                .buffer_mut_thin_ptr()
+            self.buffer_mut_thin_ptr()
                 .add(tail as usize % CAPACITY)
                 .write(MaybeUninit::new(value));
         }
@@ -406,7 +400,11 @@ impl<T, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> + Defau
     ///
     /// The called should be the only producer.
     #[inline]
-    pub unsafe fn producer_push<SBR: SyncBatchReceiver<T>>(&self, value: T, sync_batch_receiver: &SBR) {
+    pub unsafe fn producer_push<SBR: SyncBatchReceiver<T>>(
+        &self,
+        value: T,
+        sync_batch_receiver: &SBR,
+    ) {
         let head = self.head.load(Acquire);
         let tail = unsafe { self.tail.unsync_load() }; // only producer can change tail
 
@@ -575,20 +573,12 @@ impl<T, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> + Defau
             if n <= right {
                 // No wraparound, copy in one shot
                 unsafe {
-                    ptr::copy_nonoverlapping(
-                        self.buffer_thin_ptr().add(head_idx),
-                        dst_ptr,
-                        n,
-                    );
+                    ptr::copy_nonoverlapping(self.buffer_thin_ptr().add(head_idx), dst_ptr, n);
                 }
             } else {
                 unsafe {
                     // Wraparound: copy right half then left half
-                    ptr::copy_nonoverlapping(
-                        self.buffer_thin_ptr().add(head_idx),
-                        dst_ptr,
-                        right,
-                    );
+                    ptr::copy_nonoverlapping(self.buffer_thin_ptr().add(head_idx), dst_ptr, right);
                     ptr::copy_nonoverlapping(self.buffer_thin_ptr(), dst_ptr.add(right), n - right);
                 }
             }
@@ -623,6 +613,10 @@ impl<T, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> + Defau
 
     /// Steals many values from the consumer to the `dst`.
     /// Returns the number of values stolen.
+    /// 
+    /// # Panics
+    /// 
+    /// If `dst` is not empty.
     pub fn steal_into(&self, dst: &Self) -> usize {
         let mut src_head = self.head.load(Acquire);
         let dst_tail = unsafe { dst.tail.unsync_load() }; // only producer can change tail
@@ -717,19 +711,32 @@ impl<T, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> + Defau
     }
 }
 
-unsafe impl<T, const CAPACITY: usize, AtomicWrapper> Sync for SPMCBoundedQueue<T, CAPACITY, AtomicWrapper>
-    where AtomicWrapper: Deref<Target = LongAtomic> + Default
-{}
-unsafe impl<T, const CAPACITY: usize, AtomicWrapper> Send for SPMCBoundedQueue<T, CAPACITY, AtomicWrapper>
-    where AtomicWrapper: Deref<Target = LongAtomic> + Default
-{}
+impl<T, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> + Default> Default for SPMCBoundedQueue<T, CAPACITY, AtomicWrapper> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+unsafe impl<T, const CAPACITY: usize, AtomicWrapper> Sync
+    for SPMCBoundedQueue<T, CAPACITY, AtomicWrapper>
+where
+    AtomicWrapper: Deref<Target = LongAtomic> + Default,
+{
+}
+unsafe impl<T, const CAPACITY: usize, AtomicWrapper> Send
+    for SPMCBoundedQueue<T, CAPACITY, AtomicWrapper>
+where
+    AtomicWrapper: Deref<Target = LongAtomic> + Default,
+{
+}
 
 impl<T, const CAPACITY: usize, AtomicWrapper> Drop for SPMCBoundedQueue<T, CAPACITY, AtomicWrapper>
-    where AtomicWrapper: Deref<Target = LongAtomic> + Default
+where
+    AtomicWrapper: Deref<Target = LongAtomic> + Default,
 {
     fn drop(&mut self) {
         // While dropping there is no concurrency
-        
+
         if needs_drop::<T>() {
             let mut head = unsafe { self.head.unsync_load() };
             let tail = unsafe { self.tail.unsync_load() };
@@ -737,14 +744,13 @@ impl<T, const CAPACITY: usize, AtomicWrapper> Drop for SPMCBoundedQueue<T, CAPAC
             while head != tail {
                 unsafe {
                     ptr::drop_in_place(
-                        self
-                            .buffer_thin_ptr()
+                        self.buffer_thin_ptr()
                             .add(head as usize % CAPACITY)
                             .cast::<T>()
-                            .cast_mut()
+                            .cast_mut(),
                     );
                 }
-                
+
                 head = head.wrapping_add(1);
             }
         }
@@ -794,7 +800,7 @@ macro_rules! generate_spmc_producer_and_consumer {
 
             #[inline]
             unsafe fn push_many_unchecked(&mut self, first: &[T], last: &[T]) {
-                self.inner.producer_push_many_unchecked(first, last);
+                unsafe { self.inner.producer_push_many_unchecked(first, last) };
             }
 
             #[inline]
@@ -904,15 +910,18 @@ generate_spmc_producer_and_consumer!(SPMCProducer, SPMCConsumer);
 /// assert_eq!(unsafe { slice[0].assume_init() }, 1);
 /// assert_eq!(unsafe { slice[1].assume_init() }, 2);
 /// ```
-pub fn new_bounded<T, const CAPACITY: usize>(
-) -> (SPMCProducer<T, CAPACITY>, SPMCConsumer<T, CAPACITY>) {
+pub fn new_bounded<T, const CAPACITY: usize>()
+-> (SPMCProducer<T, CAPACITY>, SPMCConsumer<T, CAPACITY>) {
     let queue = LightArc::new(SPMCBoundedQueue::new());
 
     (
         SPMCProducer {
             inner: queue.clone(),
         },
-        SPMCConsumer { inner: queue, _non_sync: PhantomData },
+        SPMCConsumer {
+            inner: queue,
+            _non_sync: PhantomData,
+        },
     )
 }
 
@@ -968,7 +977,10 @@ pub fn new_cache_padded_bounded<T, const CAPACITY: usize>() -> (
         CachePaddedSPMCProducer {
             inner: queue.clone(),
         },
-        CachePaddedSPMCConsumer { inner: queue, _non_sync: PhantomData },
+        CachePaddedSPMCConsumer {
+            inner: queue,
+            _non_sync: PhantomData,
+        },
     )
 }
 
@@ -984,11 +996,17 @@ mod tests {
     fn test_spmc_bounded_size() {
         let queue = SPMCBoundedQueue::<(), CAPACITY>::new();
 
-        assert_eq!(size_of_val(&queue), size_of::<usize>() + size_of::<LongAtomic>() * 2);
+        assert_eq!(
+            size_of_val(&queue),
+            size_of::<usize>() + size_of::<LongAtomic>() * 2
+        );
 
         let cache_padded_queue = SPMCBoundedQueue::<(), CAPACITY, CachePaddedLongAtomic>::new();
 
-        assert_eq!(size_of_val(&cache_padded_queue), size_of::<CachePaddedLongAtomic>() * 2 + size_of::<usize>());
+        assert_eq!(
+            size_of_val(&cache_padded_queue),
+            size_of::<CachePaddedLongAtomic>() * 2 + size_of::<usize>()
+        );
     }
 
     #[test]

@@ -18,5 +18,5 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(parcoll_loom)'] }
 
 [[test]]
 name = "loom_tests"
-path = "src/tests/loom.rs"
+path = "src/loom.rs"
 required-features = ["always_steal"]
