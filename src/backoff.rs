@@ -31,7 +31,7 @@ impl Backoff {
     #[inline]
     #[allow(
         dead_code,
-        reason = "It is fork, therefore it is more convenient to keep all original methods"
+        reason = "It is fork; therefore, it is more convenient to keep all original methods"
     )]
     pub fn reset(&self) {
         self.step.set(0);
@@ -46,7 +46,7 @@ impl Backoff {
     #[inline]
     #[allow(
         dead_code,
-        reason = "It is fork, therefore it is more convenient to keep all original methods"
+        reason = "It is a fork; therefore, it is more convenient to keep all original methods"
     )]
     pub fn spin(&self) {
         for _ in 0..1 << self.step.get().min(SPIN_LIMIT) {
@@ -73,7 +73,7 @@ impl Backoff {
     #[inline]
     #[allow(
         dead_code,
-        reason = "It is fork, therefore it is more convenient to keep all original methods"
+        reason = "It is a fork; therefore, it is more convenient to keep all original methods"
     )]
     pub fn snooze(&self) {
         if likely(self.step.get() <= SPIN_LIMIT) {

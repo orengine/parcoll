@@ -15,11 +15,13 @@ use std::ops::Deref;
 use std::sync::atomic::Ordering;
 use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
 use std::{ptr, slice};
+use std::alloc::{alloc, Layout};
+use std::cell::UnsafeCell;
 
 /// Packs the version and the tail into a single 64-bit value.
 #[inline(always)]
 fn pack_version_and_tail(version: u32, tail: u32) -> u64 {
-    ((version as u64) << 32) | tail as u64
+    (u64::from(version) << 32) | u64::from(tail)
 }
 
 /// Unpacks the version and the tail from a single 64-bit value.
@@ -47,13 +49,15 @@ impl<T> Version<T> {
     fn alloc_new(capacity: usize, id: u32) -> LightArc<Self> {
         debug_assert!(capacity > 0 && u32::try_from(capacity).is_ok() && capacity.is_power_of_two());
 
-        let slice_ptr = (0..capacity)
-            .map(|_| MaybeUninit::uninit())
-            .collect::<Vec<_>>()
-            .into_boxed_slice();
+        let slice_ptr = unsafe {
+            slice::from_raw_parts_mut(
+                alloc(Layout::array::<MaybeUninit<T>>(capacity).unwrap_unchecked()).cast::<MaybeUninit<T>>(),
+                capacity
+            )
+        };
 
         LightArc::new(Self {
-            ptr: Box::into_raw(slice_ptr),
+            ptr: slice_ptr,
             mask: (capacity - 1) as u32,
             id,
         })
@@ -83,7 +87,7 @@ struct CachedVersion<T> {
 }
 
 impl<T> CachedVersion<T> {
-    /// Returns a cached version of the given `arc` version.
+    /// Returns a cached version from the given `arc` version.
     fn from_arc_version(arc: LightArc<Version<T>>) -> Self {
         Self {
             ptr: arc.ptr,
@@ -190,6 +194,7 @@ where
         Self::with_capacity(4)
     }
 
+
     /// Updates the version of the queue or returns `false`.
     ///
     /// If it returned `false`, then we should guess that the producer has been preempted,
@@ -204,9 +209,8 @@ where
             // It is very unlikely to happen because the consumer tries to update the version
             // only after the producer updates the version id;
             // therefore, we can be here only
-            // it producer updates the version and the version id from A to B
-            // and then locks
-            // the version to update from B to C,
+            // if the producer updates the version and the version id from A to B
+            // and then locks the version to update from B to C,
             // and the consumer tries to update from A to B.
             return false;
         };
@@ -215,7 +219,7 @@ where
         // and only then next updates the version id.
         // The version_id in `tail_and_version`
         // can mismatch with the version id
-        // only if the producer already updated the version but not the version id,
+        // only if the producer has already updated the version but not the version id,
         // and the consumer tries to load the new version.
         //
         // We can represent this as:
@@ -285,7 +289,7 @@ where
         // We can avoid checking the version,
         // because the producer always has the latest version.
 
-        SPMCUnboundedQueue::<T, AtomicU32Wrapper, AtomicU64Wrapper>::len(head, tail)
+        Self::len(head, tail)
     }
 
     /// Returns the capacity of the queue.
@@ -294,7 +298,7 @@ where
     ///
     /// It is called only by the producer.
     #[inline]
-    unsafe fn producer_capacity(&self, version: &CachedVersion<T>) -> usize {
+    unsafe fn producer_capacity(version: &CachedVersion<T>) -> usize {
         // The producer always has the latest version.
         version.capacity()
     }
@@ -310,7 +314,7 @@ where
 
         if tail_idx + slice.len() <= version.capacity() {
             unsafe {
-                ptr::copy_nonoverlapping(slice.as_ptr(), buffer_ptr.add(tail_idx), slice.len())
+                ptr::copy_nonoverlapping(slice.as_ptr(), buffer_ptr.add(tail_idx), slice.len());
             };
         } else {
             let right = version.capacity() - tail_idx;
@@ -403,14 +407,14 @@ where
     ///
     /// It is called only by the producer,
     /// and the provided capacity should be more than the current capacity,
-    /// and less than u32::MAX and be a power of two.
+    /// and less than `u32::MAX` and be a power of two.
     unsafe fn producer_reserve(&self, new_capacity: usize, version: &mut CachedVersion<T>) {
         debug_assert!(
             new_capacity > version.capacity(),
             "new_capacity should be more than version.capacity()"
         );
         debug_assert!(
-            new_capacity <= u32::MAX as usize,
+            u32::try_from(new_capacity).is_ok(),
             "new_capacity should be less than u32::MAX"
         );
         debug_assert!(
@@ -426,7 +430,8 @@ where
             version,
         );
 
-        self.tail_and_version
+        self
+            .tail_and_version
             .store(pack_version_and_tail(cached_version.id(), tail), Release);
 
         *version = cached_version;
@@ -780,21 +785,9 @@ where
         version: &mut CachedVersion<T>,
     ) -> usize {
         let mut head = self.head.load(Acquire);
-
-        // The thread can be preempted here,
-        // but we will load the tail and check the version,
-        // it the versions are the same,
-        // but `tail` - `head` > version.capacity(),
-        // then the thread has been preempted, and we retry,
-        // else it doesn't matter, and we can read even the old version,
-        // because we hold the Arc.
-        // If the head is unchanged, we can return and don't think about the version
-        // (we have read it at the valid state),
-        // else we retry.
-
         let (mut last_version_id, mut tail) = self.sync_load_version_and_tail(Acquire);
 
-        'top: loop {
+        loop {
             if unlikely(version.id() < last_version_id) {
                 if unlikely(!self.update_version(version)) {
                     // We can't reliably calculate the length in this situation.
@@ -843,32 +836,26 @@ where
                 }
             }
 
-            'weak_cas_loop: loop {
-                // Now claim ownership
-                match self.head.compare_exchange_weak(
-                    head,
-                    head.wrapping_add(n as u32),
-                    Release,
-                    Acquire,
-                ) {
-                    Ok(_) => return n,
-                    Err(actual_head) => {
-                        if unlikely(actual_head == head) {
-                            // we can just retry, it is a false positive
-                            continue 'weak_cas_loop;
-                        }
+            // Now claim ownership
+            // CAS is strong because we don't want to recopy the values
+            match self.head.compare_exchange(
+                head,
+                head.wrapping_add(n as u32),
+                Release,
+                Acquire,
+            ) {
+                Ok(_) => return n,
+                Err(actual_head) => {
+                    // CAS failed, forget read values (they're MaybeUninit, so it's fine)
+                    // But don't try to drop, just retry
 
-                        // CAS failed, forget read values (they're MaybeUninit, so it's fine)
-                        // But don't try to drop, just retry
-                        head = actual_head;
+                    head = actual_head;
+                    (last_version_id, tail) = self.sync_load_version_and_tail(Acquire);
 
-                        (last_version_id, tail) = self.sync_load_version_and_tail(Acquire);
-
-                        continue 'top;
-                    }
+                    continue;
                 }
             }
-        }
+    }
     }
 
     /// Steals many values from the consumer to the `dst`.
@@ -960,6 +947,7 @@ where
                 dst_version,
             );
 
+            // CAS is strong because we don't want to recopy the values
             let res = self.head.compare_exchange(
                 src_head,
                 src_head.wrapping_add(n as u32),
@@ -978,7 +966,9 @@ where
                     return n;
                 }
                 Err(current_head) => {
-                    // another thread has read the same values, full retry
+                    // Another thread has read the same values,
+                    // forget them and full retry
+
                     src_head = current_head;
                     (src_last_version_id, src_tail) = self.sync_load_version_and_tail(Acquire);
 
@@ -989,6 +979,7 @@ where
     }
 }
 
+#[allow(clippy::non_send_fields_in_send_ty, reason = "We guarantee it is Send")]
 unsafe impl<T, AtomicU32Wrapper, AtomicU64Wrapper> Send
     for SPMCUnboundedQueue<T, AtomicU32Wrapper, AtomicU64Wrapper>
 where
@@ -1040,20 +1031,29 @@ macro_rules! generate_spmc_producer_and_consumer {
         /// The producer of the [`SPMCUnboundedQueue`].
         pub struct $producer_name<T> {
             inner: LightArc<SPMCUnboundedQueue<T, $atomic_u32_wrapper, $long_atomic_wrapper>>,
-            cached_version: CachedVersion<T>,
+            cached_version: UnsafeCell<CachedVersion<T>>, // The producer is not Sync, it needs only shared references and it never gets two mutable references to this field
+            _non_sync: PhantomData<*const ()>,
         }
 
         impl<T> $producer_name<T> {
+            /// Returns a mutable reference to the cached version.
+            #[allow(clippy::mut_from_ref, reason = "It improves readability")]
+            #[inline]
+            fn cached_version(&self) -> &mut CachedVersion<T> {
+                unsafe { &mut *self.cached_version.get() }
+            }
+            
             /// Updates the capacity of the queue to the given value.
             ///
             /// # Safety
             ///
             /// The provided capacity must be greater than the current capacity,
             /// less than `u32::MAX` and be a power of two.
-            pub fn reserve(&mut self, capacity: usize) {
+            pub fn reserve(&self, capacity: usize) {
                 unsafe {
-                    self.inner
-                        .producer_reserve(capacity, &mut self.cached_version)
+                    self
+                        .inner
+                        .producer_reserve(capacity, self.cached_version())
                 };
             }
         }
@@ -1062,101 +1062,113 @@ macro_rules! generate_spmc_producer_and_consumer {
             #[inline]
             fn capacity(&self) -> usize {
                 // The producer always has the latest version.
-                unsafe { self.inner.producer_capacity(&self.cached_version) }
+                unsafe { SPMCUnboundedQueue::<T, $atomic_u32_wrapper, $long_atomic_wrapper>::producer_capacity(self.cached_version()) }
             }
 
             #[inline]
-            fn len(&mut self) -> usize {
+            fn len(&self) -> usize {
                 unsafe { self.inner.producer_len() }
             }
 
             #[inline]
-            fn push<SBR: SyncBatchReceiver<T>>(&mut self, value: T, _sync_batch_receiver: &SBR) {
-                unsafe { self.inner.producer_push(value, &mut self.cached_version) };
+            fn push<SBR: SyncBatchReceiver<T>>(&self, value: T, _sync_batch_receiver: &SBR) {
+                unsafe { self.inner.producer_push(value, self.cached_version()) };
             }
 
             #[inline]
-            fn maybe_push(&mut self, value: T) -> Result<(), T> {
-                unsafe { self.inner.producer_push(value, &mut self.cached_version) };
+            fn maybe_push(&self, value: T) -> Result<(), T> {
+                unsafe { self.inner.producer_push(value, self.cached_version()) };
 
                 Ok(())
             }
 
             #[inline]
-            fn pop(&mut self) -> Option<T> {
-                unsafe { self.inner.producer_pop(&self.cached_version) }
+            fn pop(&self) -> Option<T> {
+                unsafe { self.inner.producer_pop(self.cached_version()) }
             }
 
             #[inline]
-            fn pop_many(&mut self, dst: &mut [MaybeUninit<T>]) -> usize {
-                unsafe { self.inner.producer_pop_many(dst, &self.cached_version) }
+            fn pop_many(&self, dst: &mut [MaybeUninit<T>]) -> usize {
+                unsafe { self.inner.producer_pop_many(dst, self.cached_version()) }
             }
 
             #[inline]
-            unsafe fn push_many_unchecked(&mut self, first: &[T], last: &[T]) {
+            unsafe fn push_many_unchecked(&self, first: &[T], last: &[T]) {
                 unsafe {
-                    self.inner
-                        .producer_push_many_unchecked(first, last, &self.cached_version)
+                    self
+                    .inner
+                        .producer_push_many_unchecked(first, last, self.cached_version())
                 }
             }
 
             #[inline]
-            fn maybe_push_many(&mut self, slice: &[T]) -> Result<(), ()> {
+            unsafe fn maybe_push_many(&self, slice: &[T]) -> Result<(), ()> {
                 unsafe {
-                    self.inner
-                        .producer_push_many(slice, &mut self.cached_version)
+                    self
+                    .inner
+                        .producer_push_many(slice, self.cached_version())
                 };
 
                 Ok(())
             }
 
             #[inline]
-            fn push_many<SBR: SyncBatchReceiver<T>>(
-                &mut self,
+            unsafe fn push_many<SBR: SyncBatchReceiver<T>>(
+                &self,
                 slice: &[T],
                 _sync_batch_receiver: &SBR,
             ) {
                 unsafe {
                     self.inner
-                        .producer_push_many(slice, &mut self.cached_version)
+                        .producer_push_many(slice, self.cached_version())
                 };
             }
         }
 
         unsafe impl<T: Send> Sync for $producer_name<T> {}
+        #[allow(clippy::non_send_fields_in_send_ty, reason = "We guarantee it is Send")]
         unsafe impl<T: Send> Send for $producer_name<T> {}
 
         /// The consumer of the [`SPMCUnboundedQueue`].
         pub struct $consumer_name<T> {
             inner: LightArc<SPMCUnboundedQueue<T, $atomic_u32_wrapper, $long_atomic_wrapper>>,
-            cached_version: CachedVersion<T>,
+            cached_version: UnsafeCell<CachedVersion<T>>,
             _non_sync: PhantomData<*const ()>,
+        }
+
+        impl<T> $consumer_name<T> {
+            /// Returns a mutable reference to the cached version.
+            #[allow(clippy::mut_from_ref, reason = "It improves readability")]
+            #[inline]
+            fn cached_version(&self) -> &mut CachedVersion<T> {
+                unsafe { &mut *self.cached_version.get() }
+            }
         }
 
         impl<T: Send> Consumer<T> for $consumer_name<T> {
             type AssociatedProducer = $producer_name<T>;
 
             #[inline]
-            fn capacity(&mut self) -> usize {
-                self.inner.consumer_capacity(&mut self.cached_version)
+            fn capacity(&self) -> usize {
+                self.inner.consumer_capacity(self.cached_version())
             }
 
             #[inline]
-            fn len(&mut self) -> usize {
-                self.inner.consumer_len(&mut self.cached_version)
+            fn len(&self) -> usize {
+                self.inner.consumer_len(self.cached_version())
             }
 
             #[inline]
-            fn pop_many(&mut self, dst: &mut [MaybeUninit<T>]) -> usize {
-                self.inner.consumer_pop_many(dst, &mut self.cached_version)
+            fn pop_many(&self, dst: &mut [MaybeUninit<T>]) -> usize {
+                self.inner.consumer_pop_many(dst, self.cached_version())
             }
 
             #[inline]
-            fn steal_into(&mut self, dst: &mut Self::AssociatedProducer) -> usize {
+            fn steal_into(&self, dst: &Self::AssociatedProducer) -> usize {
                 self.inner.steal_into(
                     &*dst.inner,
-                    &mut self.cached_version,
-                    &mut dst.cached_version,
+                    self.cached_version(),
+                    dst.cached_version(),
                 )
             }
         }
@@ -1164,13 +1176,14 @@ macro_rules! generate_spmc_producer_and_consumer {
         impl<T> Clone for $consumer_name<T> {
             fn clone(&self) -> Self {
                 Self {
-                    cached_version: self.cached_version.clone(),
+                    cached_version: UnsafeCell::new(self.cached_version().clone()),
                     inner: self.inner.clone(),
                     _non_sync: PhantomData,
                 }
             }
         }
 
+        #[allow(clippy::non_send_fields_in_send_ty, reason = "We guarantee it is Send")]
         unsafe impl<T: Send> Send for $consumer_name<T> {}
     };
 
@@ -1231,16 +1244,18 @@ generate_spmc_producer_and_consumer!(SPMCUnboundedProducer, SPMCUnboundedConsume
 /// assert_eq!(unsafe { slice[1].assume_init() }, 2);
 /// ```
 pub fn new_unbounded<T>() -> (SPMCUnboundedProducer<T>, SPMCUnboundedConsumer<T>) {
-    let queue = LightArc::new(SPMCUnboundedQueue::new());
-    let version = queue.last_version.try_read().unwrap().clone();
+    let mut queue = SPMCUnboundedQueue::new();
+    let version = queue.last_version.get_mut().clone();
+    let queue = LightArc::new(queue);
 
     (
         SPMCUnboundedProducer {
             inner: queue.clone(),
-            cached_version: CachedVersion::from_arc_version(version.clone()),
+            cached_version: UnsafeCell::new(CachedVersion::from_arc_version(version.clone())),
+            _non_sync: PhantomData,
         },
         SPMCUnboundedConsumer {
-            cached_version: CachedVersion::from_arc_version(version),
+            cached_version: UnsafeCell::new(CachedVersion::from_arc_version(version)),
             inner: queue,
             _non_sync: PhantomData,
         },
@@ -1302,16 +1317,18 @@ pub fn new_cache_padded_unbounded<T>() -> (
     CachePaddedSPMCUnboundedProducer<T>,
     CachePaddedSPMCUnboundedConsumer<T>,
 ) {
-    let queue = LightArc::new(SPMCUnboundedQueue::new());
-    let version = queue.last_version.try_read().unwrap().clone();
+    let mut queue = SPMCUnboundedQueue::new();
+    let version = queue.last_version.get_mut().clone();
+    let queue = LightArc::new(queue);
 
     (
         CachePaddedSPMCUnboundedProducer {
             inner: queue.clone(),
-            cached_version: CachedVersion::from_arc_version(version.clone()),
+            cached_version: UnsafeCell::new(CachedVersion::from_arc_version(version.clone())),
+            _non_sync: PhantomData,
         },
         CachePaddedSPMCUnboundedConsumer {
-            cached_version: CachedVersion::from_arc_version(version),
+            cached_version: UnsafeCell::new(CachedVersion::from_arc_version(version)),
             inner: queue,
             _non_sync: PhantomData,
         },
@@ -1330,7 +1347,7 @@ mod tests {
     #[test]
     fn test_spmc_unbounded_seq_insertions() {
         let global_queue = MutexVecQueue::new();
-        let (mut producer, _) = new_unbounded();
+        let (producer, _) = new_unbounded();
 
         for i in 0..N {
             producer.push(i, &global_queue);
@@ -1342,7 +1359,7 @@ mod tests {
             assert_eq!(producer.pop().unwrap(), i);
         }
 
-        let (mut producer, mut consumer) = new_unbounded();
+        let (producer, consumer) = new_unbounded();
 
         for i in 0..N {
             producer.maybe_push(i).unwrap();
@@ -1365,7 +1382,7 @@ mod tests {
 
         let global_queue = MutexVecQueue::new();
         let mut stolen = VecDeque::new();
-        let (mut producer1, mut consumer) = new_unbounded();
+        let (producer1, consumer) = new_unbounded();
         let (mut producer2, _) = new_unbounded();
 
         producer2.reserve(512);
@@ -1401,14 +1418,14 @@ mod tests {
         const N: usize = BATCH_SIZE * 100;
 
         let global_queue = MutexVecQueue::new();
-        let (mut producer, mut consumer) = new_unbounded();
+        let (producer, consumer) = new_unbounded();
 
         for i in 0..N / BATCH_SIZE / 2 {
             let slice = (0..BATCH_SIZE)
                 .map(|j| i * BATCH_SIZE + j)
                 .collect::<Vec<_>>();
 
-            producer.maybe_push_many(&*slice).unwrap();
+            unsafe { producer.maybe_push_many(&*slice).unwrap(); }
 
             let mut slice = [MaybeUninit::uninit(); BATCH_SIZE];
             producer.pop_many(slice.as_mut_slice());
@@ -1425,7 +1442,7 @@ mod tests {
                 .map(|j| i * BATCH_SIZE + j)
                 .collect::<Vec<_>>();
 
-            producer.push_many(&*slice, &global_queue);
+            unsafe { producer.push_many(&*slice, &global_queue); }
 
             assert!(global_queue.is_empty());
 

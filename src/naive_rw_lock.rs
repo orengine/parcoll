@@ -86,6 +86,11 @@ impl<T, AtomicWrapper: Deref<Target = AtomicI32> + Default> NaiveRWLock<T, Atomi
         }
     }
 
+    /// Returns a mutable reference to the underlying data.
+    pub fn get_mut(&mut self) -> &mut T {
+        unsafe { &mut *self.data.get() }
+    }
+
     /// Tries to acquire a read lock. Returns `None` if a write lock is held.
     pub fn try_read(&self) -> Option<NaiveRWLockReadGuard<T, AtomicWrapper>> {
         let mut state = self.state.load(Ordering::Acquire);
