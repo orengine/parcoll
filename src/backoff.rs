@@ -1,7 +1,7 @@
 //! This module provides a [`Backoff`] that can be used to busy-wait with
 //! preemptive yield when it is necessary.
 //!
-//! It has the same API as [`crossbeam::Backoff`].
+//! It has the same API as `crossbeam::Backoff`.
 use crate::hints::likely;
 use core::cell::Cell;
 use core::fmt;

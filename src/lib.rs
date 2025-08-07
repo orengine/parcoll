@@ -43,16 +43,19 @@
 pub mod backoff;
 pub mod cache_padded;
 pub mod hints;
-pub mod light_arc;
+mod light_arc;
 #[cfg(all(parcoll_loom, test))]
 mod loom;
 pub mod loom_bindings;
-pub mod mutex_vec_queue;
-mod naive_rw_lock;
+pub(crate) mod mutex_vec_queue;
+pub(crate) mod naive_rw_lock;
 pub mod number_types;
 pub mod spmc;
 pub mod spsc;
-pub mod sync_batch_receiver;
+pub(crate) mod sync_batch_receiver;
 #[cfg(not(parcoll_loom))]
 mod test_lock;
-mod test_utils;
+
+pub use light_arc::LightArc;
+pub use mutex_vec_queue::MutexVecQueue;
+pub use sync_batch_receiver::SyncBatchReceiver;

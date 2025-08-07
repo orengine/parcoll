@@ -1,8 +1,8 @@
 use parcoll::loom_bindings::thread;
-use parcoll::spmc::{Consumer as ConsumerExt, Producer as ProducerExt};
 use parcoll::spmc::{
     new_bounded, new_cache_padded_bounded, new_cache_padded_unbounded, new_unbounded,
 };
+use parcoll::spmc::{Consumer as ConsumerExt, Producer as ProducerExt};
 
 fn loom_basic_steal<Producer, Consumer, C>(creator: C)
 where

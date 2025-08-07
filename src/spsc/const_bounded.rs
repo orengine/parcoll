@@ -1,7 +1,10 @@
 //! This module provides a single-producer single-consumer queue.
 //!
 //! It is implemented as a const bounded ring buffer.
-#![allow(clippy::cast_possible_truncation, reason = "LongNumber should be synonymous to usize")]
+#![allow(
+    clippy::cast_possible_truncation,
+    reason = "LongNumber should be synonymous to usize"
+)]
 use crate::hints::unlikely;
 use crate::light_arc::LightArc;
 use crate::number_types::{
@@ -9,7 +12,7 @@ use crate::number_types::{
 };
 use crate::spsc::{Consumer, Producer};
 use std::marker::PhantomData;
-use std::mem::{MaybeUninit, needs_drop};
+use std::mem::{needs_drop, MaybeUninit};
 use std::ops::Deref;
 use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
 use std::{ptr, slice};
@@ -96,7 +99,7 @@ impl<T, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> + Defau
 
 // Producer
 impl<T, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> + Default>
-SPSCBoundedQueue<T, CAPACITY, AtomicWrapper>
+    SPSCBoundedQueue<T, CAPACITY, AtomicWrapper>
 {
     /// Pushes a slice into the queue. Returns a new tail (not index).
     fn copy_slice(buffer_ptr: *mut T, start_tail: LongNumber, slice: &[T]) -> LongNumber {
@@ -273,7 +276,7 @@ impl<T, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> + Defau
         }
 
         self.head.store(head.wrapping_add(n as LongNumber), Release);
-        
+
         n
     }
 
@@ -339,14 +342,18 @@ impl<T, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> + Defau
             src_left,
         );
 
-        self.head.store(src_head.wrapping_add(n as LongNumber), Release);
-        dst.tail.store(dst_tail.wrapping_add(n as LongNumber), Release);
+        self.head
+            .store(src_head.wrapping_add(n as LongNumber), Release);
+        dst.tail
+            .store(dst_tail.wrapping_add(n as LongNumber), Release);
 
         n
     }
 }
 
-impl<T, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> + Default> Default for SPSCBoundedQueue<T, CAPACITY, AtomicWrapper> {
+impl<T, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> + Default> Default
+    for SPSCBoundedQueue<T, CAPACITY, AtomicWrapper>
+{
     fn default() -> Self {
         Self::new()
     }
@@ -356,13 +363,15 @@ unsafe impl<T, const CAPACITY: usize, AtomicWrapper> Sync
     for SPSCBoundedQueue<T, CAPACITY, AtomicWrapper>
 where
     AtomicWrapper: Deref<Target = LongAtomic> + Default,
-{}
+{
+}
 #[allow(clippy::non_send_fields_in_send_ty, reason = "We guarantee it is Send")]
 unsafe impl<T, const CAPACITY: usize, AtomicWrapper> Send
     for SPSCBoundedQueue<T, CAPACITY, AtomicWrapper>
 where
     AtomicWrapper: Deref<Target = LongAtomic> + Default,
-{}
+{
+}
 
 impl<T, const CAPACITY: usize, AtomicWrapper> Drop for SPSCBoundedQueue<T, CAPACITY, AtomicWrapper>
 where
@@ -484,6 +493,15 @@ generate_spsc_producer_and_consumer!(SPSCProducer, SPSCConsumer);
 /// The producer __should__ be only one while consumers can be cloned.
 /// If you want to use more than one producer, don't use this queue.
 ///
+/// # Bounded queue vs. [`unbounded queue`](crate::spsc::new_unbounded)
+///
+/// - [`maybe_push`](Producer::maybe_push), [`maybe_push_many`](Producer::maybe_push_many)
+///   can return an error only for `bounded` queue.
+/// - [`Consumer::steal_into`] and [`Consumer::pop_many`] can pop zero values even if the source
+///   queue is not empty for `unbounded` queue.
+/// - [`Consumer::capacity`] and [`Consumer::len`] can return old values for `unbounded` queue.
+/// - All methods of `bounded` queue work much faster than all methods of `unbounded` queue.
+///
 /// # Cache padding
 ///
 /// Cache padding can improve the performance of the queue many times, but it also requires
@@ -508,8 +526,8 @@ generate_spsc_producer_and_consumer!(SPSCProducer, SPSCConsumer);
 /// assert_eq!(unsafe { slice[0].assume_init() }, 1);
 /// assert_eq!(unsafe { slice[1].assume_init() }, 2);
 /// ```
-pub fn new_bounded<T, const CAPACITY: usize>()
-    -> (SPSCProducer<T, CAPACITY>, SPSCConsumer<T, CAPACITY>) {
+pub fn new_bounded<T, const CAPACITY: usize>(
+) -> (SPSCProducer<T, CAPACITY>, SPSCConsumer<T, CAPACITY>) {
     let queue = LightArc::new(SPSCBoundedQueue::new());
 
     (
@@ -538,6 +556,15 @@ generate_spsc_producer_and_consumer!(
 ///
 /// The producer __should__ be only one while consumers can be cloned.
 /// If you want to use more than one producer, don't use this queue.
+///
+/// # Bounded queue vs. [`unbounded queue`](crate::spsc::new_unbounded)
+///
+/// - [`maybe_push`](Producer::maybe_push), [`maybe_push_many`](Producer::maybe_push_many)
+///   can return an error only for `bounded` queue.
+/// - [`Consumer::steal_into`] and [`Consumer::pop_many`] can pop zero values even if the source
+///   queue is not empty for `unbounded` queue.
+/// - [`Consumer::capacity`] and [`Consumer::len`] can return old values for `unbounded` queue.
+/// - All methods of `bounded` queue work much faster than all methods of `unbounded` queue.
 ///
 /// # Cache padding
 ///
@@ -668,7 +695,9 @@ mod tests {
                 .map(|j| i * BATCH_SIZE + j)
                 .collect::<Vec<_>>();
 
-            unsafe { producer.maybe_push_many(&*slice).unwrap(); }
+            unsafe {
+                producer.maybe_push_many(&*slice).unwrap();
+            }
 
             let mut slice = [MaybeUninit::uninit(); BATCH_SIZE];
             consumer.pop_many(slice.as_mut_slice());

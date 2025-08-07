@@ -68,7 +68,7 @@ impl<T, AtomicWrapper: Deref<Target = AtomicI32> + Default> Drop
 
 /// A naive read-write lock.
 /// It can when and only when write operations are rare.
-/// In this case it works much faster than [`std::sync::RwLock`].
+/// In this case, it works much faster than [`std::sync::RwLock`].
 pub struct NaiveRWLock<
     T,
     AtomicWrapper: Deref<Target = AtomicI32> + Default = NonCachePaddedAtomicI32,

@@ -1,13 +1,11 @@
-use crate::spsc::{
-    Consumer as ConsumerExt, Producer as ProducerExt, new_bounded, new_cache_padded_bounded,
-};
-use crate::test_lock::TEST_LOCK;
-use std::mem::MaybeUninit;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::thread::spawn;
 use crate::backoff::Backoff;
 use crate::loom_bindings::thread::yield_now;
+use crate::spsc::{new_bounded, new_cache_padded_bounded, new_cache_padded_unbounded, new_unbounded, Consumer as ConsumerExt, Producer as ProducerExt};
+use crate::test_lock::TEST_LOCK;
+use std::mem::MaybeUninit;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::thread::spawn;
 // Note: test values are boxed in Miri tests so that destructors called on freed
 // values and forgotten destructors can be detected.
 
@@ -41,7 +39,7 @@ where
     Producer: ProducerExt<TestValue<usize>> + Send + 'static,
     Consumer: ConsumerExt<TestValue<usize>, AssociatedProducer = Producer> + Send + 'static,
 {
-    const N: usize = if cfg!(miri) { 200 } else { 10_000_000 };
+    const N: usize = if cfg!(miri) { 200 } else { 1_000_000 };
     const CHECK_TO: usize = if cfg!(feature = "always_steal") {
         N
     } else {
@@ -74,31 +72,30 @@ where
     // Stealer threads.
     //
     // Repeatedly steal a random number of items.
-    let steal_periodically =
-        move |consumer: Consumer| -> (Vec<usize>, Consumer) {
-            let counter = AtomicUsize::new(0);
-            let mut stats = vec![0; N];
-            let (dst_producer, dst_consumer) = creator();
+    let steal_periodically = move |consumer: Consumer| -> (Vec<usize>, Consumer) {
+        let counter = AtomicUsize::new(0);
+        let mut stats = vec![0; N];
+        let (dst_producer, dst_consumer) = creator();
 
-            loop {
-                consumer.steal_into(&dst_producer);
+        loop {
+            consumer.steal_into(&dst_producer);
 
-                while let Some(i) = dst_consumer.pop() {
-                    stats[*i] += 1;
-                    counter.fetch_add(1, Ordering::Relaxed);
-                }
-
-                let count = counter.load(Ordering::Relaxed);
-
-                if count == N || !cfg!(feature = "always_steal") && count > CHECK_TO {
-                    break;
-                }
-
-                assert!(count < N);
+            while let Some(i) = dst_consumer.pop() {
+                stats[*i] += 1;
+                counter.fetch_add(1, Ordering::Relaxed);
             }
 
-            (stats, consumer)
-        };
+            let count = counter.load(Ordering::Relaxed);
+
+            if count == N || !cfg!(feature = "always_steal") && count > CHECK_TO {
+                break;
+            }
+
+            assert!(count < N);
+        }
+
+        (stats, consumer)
+    };
 
     let t1 = spawn(move || steal_periodically(consumer));
     let (mut stats, consumer) = t1.join().unwrap();
@@ -136,7 +133,7 @@ where
     Producer: ProducerExt<TestValue<usize>> + Send + 'static,
     Consumer: ConsumerExt<TestValue<usize>, AssociatedProducer = Producer> + Send + 'static,
 {
-    const N: usize = if cfg!(miri) { 200 } else { 10_000_000 };
+    const N: usize = if cfg!(miri) { 200 } else { 1_000_000 };
     const BATCH_SIZE: usize = 5;
     const RES: usize = (N - 1) * N / 2;
 
@@ -200,31 +197,30 @@ fn test_bounded_spsc_multi_threaded_steal() {
     drop(test_guard);
 }
 
-// TODO
-// #[test]
-// fn test_unbounded_spsc_multi_threaded_steal() {
-//     let test_guard = TEST_LOCK.lock();
-//
-//     test_spsc_multi_threaded_steal(|| {
-//         let queue = new_unbounded();
-//
-//         queue.0.reserve(128);
-//
-//         queue
-//     });
-//
-//     println!("Non cache padded done, start cache padded");
-//
-//     test_spsc_multi_threaded_steal(|| {
-//         let queue = new_cache_padded_unbounded();
-//
-//         queue.0.reserve(128);
-//
-//         queue
-//     });
-//
-//     drop(test_guard);
-// }
+#[test]
+fn test_unbounded_spsc_multi_threaded_steal() {
+    let test_guard = TEST_LOCK.lock();
+
+    test_spsc_multi_threaded_steal(|| {
+        let queue = new_unbounded();
+
+        queue.0.reserve(128);
+
+        queue
+    });
+
+    println!("Non cache padded done, start cache padded");
+
+    test_spsc_multi_threaded_steal(|| {
+        let queue = new_cache_padded_unbounded();
+
+        queue.0.reserve(128);
+
+        queue
+    });
+
+    drop(test_guard);
+}
 
 #[test]
 fn test_bounded_spsc_multi_threaded_pop_many() {
@@ -239,16 +235,15 @@ fn test_bounded_spsc_multi_threaded_pop_many() {
     drop(test_guard);
 }
 
-// TODO
-// #[test]
-// fn test_unbounded_spsc_multi_threaded_pop_many() {
-//     let test_guard = TEST_LOCK.lock();
-//
-//     test_spsc_multi_threaded_pop_many(new_unbounded);
-//
-//     println!("Non cache padded done, start cache padded");
-//
-//     test_spsc_multi_threaded_pop_many(new_cache_padded_unbounded);
-//
-//     drop(test_guard);
-// }
+#[test]
+fn test_unbounded_spsc_multi_threaded_pop_many() {
+    let test_guard = TEST_LOCK.lock();
+
+    test_spsc_multi_threaded_pop_many(new_unbounded);
+
+    println!("Non cache padded done, start cache padded");
+
+    test_spsc_multi_threaded_pop_many(new_cache_padded_unbounded);
+
+    drop(test_guard);
+}

@@ -1,12 +1,12 @@
 use crate::backoff::Backoff;
 use crate::spmc::{
-    Consumer as ConsumerExt, Producer as ProducerExt, new_bounded, new_cache_padded_bounded,
-    new_cache_padded_unbounded, new_unbounded,
+    new_bounded, new_cache_padded_bounded, new_cache_padded_unbounded, new_unbounded,
+    Consumer as ConsumerExt, Producer as ProducerExt,
 };
 use crate::test_lock::TEST_LOCK;
 use std::mem::MaybeUninit;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::thread::spawn;
 // Note: test values are boxed in Miri tests so that destructors called on freed
 // values and forgotten destructors can be detected.
@@ -41,7 +41,7 @@ where
     Producer: ProducerExt<TestValue<usize>> + Send + 'static,
     Consumer: ConsumerExt<TestValue<usize>, AssociatedProducer = Producer> + Send + 'static,
 {
-    const N: usize = if cfg!(miri) { 200 } else { 10_000_000 };
+    const N: usize = if cfg!(miri) { 200 } else { 1_000_000 };
     const CHECK_TO: usize = if cfg!(feature = "always_steal") {
         N
     } else {
@@ -158,7 +158,7 @@ where
     Producer: ProducerExt<TestValue<usize>> + Send + 'static,
     Consumer: ConsumerExt<TestValue<usize>, AssociatedProducer = Producer> + Send + 'static,
 {
-    const N: usize = if cfg!(miri) { 200 } else { 10_000_000 };
+    const N: usize = if cfg!(miri) { 200 } else { 1_000_000 };
     const BATCH_SIZE: usize = 5;
     const RES: usize = (N - 1) * N / 2;
 

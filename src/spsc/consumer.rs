@@ -3,7 +3,7 @@ use crate::spsc::Producer;
 use std::mem::MaybeUninit;
 
 /// A consumer of the single-producer, single-consumer queue.
-/// 
+///
 /// Because it is the only consumer, it can push and pop values very quickly.
 pub trait Consumer<T> {
     /// An associated [`producer`](Producer) with this consumer.

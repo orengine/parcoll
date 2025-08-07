@@ -1,4 +1,6 @@
-//! This module provides the [`Producer`] trait for the single-producer, multi-consumer queue.
+//! This module provides the [`Producer`] and [`ConsumerSpawner`] traits for the single-producer,
+//! multi-consumer queue.
+use crate::spmc;
 use crate::sync_batch_receiver::SyncBatchReceiver;
 use std::mem::MaybeUninit;
 
@@ -64,4 +66,13 @@ pub trait Producer<T> {
     ///
     /// If the `T` is not `Copy`, the caller must [`forget`](core::mem::forget) the provided slice.
     unsafe fn push_many<SBR: SyncBatchReceiver<T>>(&self, values: &[T], sync_batch_receiver: &SBR);
+}
+
+/// A consumer spawner for the single-producer, multi-consumer queue.
+/// It can spawn [`Consumers`](spmc::Consumer).
+pub trait ConsumerSpawner<T> {
+    type Consumer: spmc::Consumer<T>;
+
+    /// Spawns a consumer.
+    fn spawn_consumer(&self) -> Self::Consumer;
 }
