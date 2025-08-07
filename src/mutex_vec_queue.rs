@@ -265,7 +265,7 @@ impl<T> SyncBatchReceiver<T> for MutexVecQueue<T> {
         inner.extend_from_slice(last);
 
         inner.push(unsafe { ptr::read(&value) });
-        
+
         // Clippy wants it
         drop(inner);
     }

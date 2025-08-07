@@ -2,8 +2,21 @@
 name = "parcoll"
 version = "0.1.0"
 edition = "2021"
+description = "Collections for parallel computing, such as SPSC, SPMC, and MPSC and MPMC queues."
+repository = "https://github.com/orengine/parcoll"
+license = "MIT"
+keywords = ["mpsc", "spmc", "spsc", "mpmc", "queue"]
+categories = ["concurrency", "data-structures"]
+authors = ["Eugene Usachev <https://github.com/Eugene-Usachev> and orengine contributors <team@orengine>"]
 
 [dependencies]
+
+[dev-dependencies]
+# For benchmarking
+criterion = "0.7.0"
+crossbeam-queue = "0.3.12"
+crossbeam-deque = "0.8.6"
+st3 = "0.4.1"
 
 [target.'cfg(parcoll_loom)'.dependencies]
 loom = "0.7.2"
@@ -19,4 +32,10 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(parcoll_loom)'] }
 [[test]]
 name = "loom_tests"
 path = "src/loom.rs"
+required-features = ["always_steal"]
+
+[[bench]]
+name = "benchmark"
+path = "benches/benchmark.rs"
+harness = false
 required-features = ["always_steal"]

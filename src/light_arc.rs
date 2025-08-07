@@ -1,7 +1,7 @@
 //! This module provides [`LightArc`].
 use crate::hints::unlikely;
 use crate::loom_bindings::sync::atomic::AtomicUsize;
-use std::alloc::{Layout, dealloc};
+use std::alloc::{dealloc, Layout};
 use std::ptr;
 use std::ptr::NonNull;
 use std::sync::atomic::Ordering;
@@ -15,7 +15,7 @@ struct LightArcInner<T> {
 
 /// A light-weight reference-counted pointer to a value.
 ///
-/// This is similar to [`Arc`] but is more lightweight because it contains only a strong count.
+/// This is similar to [`Arc`](std::sync::Arc), but is more lightweight because it contains only a strong count.
 /// Therefore, it can't provide weak references.
 #[repr(C)]
 pub struct LightArc<T> {

@@ -1,7 +1,7 @@
 //! This module provides a [`Backoff`] that can be used to busy-wait with
 //! preemptive yield when it is necessary.
 //!
-//! It has the same API as [`crossbeam::Backoff`].
+//! It has the same API as `crossbeam::Backoff`.
 use crate::hints::likely;
 use core::cell::Cell;
 use core::fmt;
@@ -31,7 +31,7 @@ impl Backoff {
     #[inline]
     #[allow(
         dead_code,
-        reason = "It is fork, therefore it is more convenient to keep all original methods"
+        reason = "It is fork; therefore, it is more convenient to keep all original methods"
     )]
     pub fn reset(&self) {
         self.step.set(0);
@@ -46,7 +46,7 @@ impl Backoff {
     #[inline]
     #[allow(
         dead_code,
-        reason = "It is fork, therefore it is more convenient to keep all original methods"
+        reason = "It is a fork; therefore, it is more convenient to keep all original methods"
     )]
     pub fn spin(&self) {
         for _ in 0..1 << self.step.get().min(SPIN_LIMIT) {
@@ -73,7 +73,7 @@ impl Backoff {
     #[inline]
     #[allow(
         dead_code,
-        reason = "It is fork, therefore it is more convenient to keep all original methods"
+        reason = "It is a fork; therefore, it is more convenient to keep all original methods"
     )]
     pub fn snooze(&self) {
         if likely(self.step.get() <= SPIN_LIMIT) {

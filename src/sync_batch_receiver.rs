@@ -1,4 +1,9 @@
-// TODO docs
+//! This module provides the [`SyncBatchReceiver`] trait.
+
+/// A batch receiver of the multi-consumer queue.
+/// It is used to move half of the values from the queue to this receiver on overflow.
+///
+/// This library provides the [`MutexVecQueue`](crate::MutexVecQueue) that implements this trait.
 pub trait SyncBatchReceiver<T> {
     /// Pushes a batch of values to the receiver.
     ///

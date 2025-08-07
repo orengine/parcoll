@@ -48,12 +48,12 @@ pub mod sync {
     pub use crate::loom_bindings::std::rwlock::RwLock;
 
     pub mod atomic {
-        pub use crate::loom_bindings::std::atomic_ptr::AtomicPtr;
-        pub use crate::loom_bindings::std::atomic_usize::{AtomicIsize, AtomicUsize};
-        pub use crate::loom_bindings::std::atomic8::{AtomicI8, AtomicU8};
         pub use crate::loom_bindings::std::atomic16::{AtomicI16, AtomicU16};
         pub use crate::loom_bindings::std::atomic32::{AtomicI32, AtomicU32};
         pub use crate::loom_bindings::std::atomic64::{AtomicI64, AtomicU64};
+        pub use crate::loom_bindings::std::atomic8::{AtomicI8, AtomicU8};
+        pub use crate::loom_bindings::std::atomic_ptr::AtomicPtr;
+        pub use crate::loom_bindings::std::atomic_usize::{AtomicIsize, AtomicUsize};
     }
 }
 
@@ -72,7 +72,7 @@ pub mod thread {
     }
 
     pub use std::thread::{
-        AccessError, Builder, JoinHandle, LocalKey, Result, Thread, ThreadId, current, panicking,
-        park, park_timeout, sleep, spawn,
+        current, panicking, park, park_timeout, sleep, spawn, AccessError, Builder, JoinHandle,
+        LocalKey, Result, Thread, ThreadId,
     };
 }

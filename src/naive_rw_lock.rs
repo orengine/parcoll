@@ -68,7 +68,7 @@ impl<T, AtomicWrapper: Deref<Target = AtomicI32> + Default> Drop
 
 /// A naive read-write lock.
 /// It can when and only when write operations are rare.
-/// In this case it works much faster than [`std::sync::RwLock`].
+/// In this case, it works much faster than [`std::sync::RwLock`].
 pub struct NaiveRWLock<
     T,
     AtomicWrapper: Deref<Target = AtomicI32> + Default = NonCachePaddedAtomicI32,
@@ -84,6 +84,11 @@ impl<T, AtomicWrapper: Deref<Target = AtomicI32> + Default> NaiveRWLock<T, Atomi
             state: AtomicWrapper::default(),
             data: UnsafeCell::new(data),
         }
+    }
+
+    /// Returns a mutable reference to the underlying data.
+    pub fn get_mut(&mut self) -> &mut T {
+        unsafe { &mut *self.data.get() }
     }
 
     /// Tries to acquire a read lock. Returns `None` if a write lock is held.

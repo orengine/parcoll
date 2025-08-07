@@ -2,33 +2,36 @@
 //!
 //! It is implemented as a const bounded ring buffer.
 //! It is optimized for the work-stealing model.
-#![allow(clippy::cast_possible_truncation, reason = "LongNumber should be synonymous to usize")]
+#![allow(
+    clippy::cast_possible_truncation,
+    reason = "LongNumber should be synonymous to usize"
+)]
 use crate::hints::unlikely;
 use crate::light_arc::LightArc;
 use crate::number_types::{
     CachePaddedLongAtomic, LongAtomic, LongNumber, NotCachePaddedLongAtomic,
 };
-use crate::spmc::{Consumer, Producer};
+use crate::spmc::{Consumer, ConsumerSpawner, Producer};
 use crate::sync_batch_receiver::SyncBatchReceiver;
 use std::marker::PhantomData;
-use std::mem::{MaybeUninit, needs_drop};
+use std::mem::{needs_drop, MaybeUninit};
 use std::ops::Deref;
 use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
 use std::{ptr, slice};
 
 // Don't care about ABA because we can count that 16-bit and 32-bit processors never
-// insert + read (2 ^ 16) - 1 or (2 ^ 32) - 1 values while some consumer are preempted.
+// insert + read (2 ^ 16) - 1 or (2 ^ 32) - 1 values while some consumer is preempted.
 // For 32-bit:
 // If we guess, it always put and get 10 values by time and do it in
 // 20 nanoseconds (it becomes slower by adding new threads), then the thread needs to be preempted
-// for 8.5 seconds while others thread only work with this queue.
+// for 8.5 seconds while the other thread only works with this queue.
 // For 16-bit:
 // We guess, it never has so much concurrency.
 // For 64-bit it is unrealistic to have the ABA problem.
 
 // Reads from the head, writes to the tail.
 
-/// The single-producer, multi-consumer ring-based _const bounded_ queue.
+/// The single-producer, single-consumer ring-based _const bounded_ queue.
 ///
 /// It is safe to use when and only when only one thread is writing to the queue at the same time.
 ///
@@ -41,7 +44,8 @@ use std::{ptr, slice};
 /// # Using directly the [`SPMCBoundedQueue`] vs. using [`new_bounded`] or [`new_cache_padded_bounded`].
 ///
 /// Functions [`new_bounded`] and [`new_cache_padded_bounded`] allocate the
-/// [`SPMCUnboundedQueue`] on the heap in [`LightArc`] and provide separate producer and consumer.
+/// [`SPMCUnboundedQueue`](crate::spmc::SPMCUnboundedQueue) on the heap in [`LightArc`]
+/// and provide separate producer and consumer.
 /// It hurts the performance if you don't need to allocate the queue separately, but improve
 /// the readability when you need to separate producer and consumer logic and share them.
 ///
@@ -543,7 +547,7 @@ impl<T, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> + Defau
         let mut head = self.head.load(Acquire);
         let mut tail = self.tail.load(Acquire);
 
-        'top: loop {
+        loop {
             let available = Self::len(head, tail);
             let n = dst.len().min(available);
 
@@ -558,6 +562,7 @@ impl<T, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> + Defau
                 // try again
 
                 head = self.head.load(Acquire);
+                tail = self.tail.load(Acquire);
 
                 continue;
             }
@@ -583,29 +588,21 @@ impl<T, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> + Defau
                 }
             }
 
-            'weak_cas_loop: loop {
-                // Now claim ownership
-                match self.head.compare_exchange_weak(
-                    head,
-                    head.wrapping_add(n as LongNumber),
-                    Release,
-                    Acquire,
-                ) {
-                    Ok(_) => return n,
-                    Err(actual_head) => {
-                        if unlikely(actual_head == head) {
-                            // we can just retry, it is a false positive
-                            continue 'weak_cas_loop;
-                        }
+            // Now claim ownership
+            // CAS is strong, because we don't want to recopy the values
+            match self.head.compare_exchange(
+                head,
+                head.wrapping_add(n as LongNumber),
+                Release,
+                Acquire,
+            ) {
+                Ok(_) => return n,
+                Err(actual_head) => {
+                    // CAS failed, forget read values (they're MaybeUninit, so it's fine)
+                    // But don't try to drop, just retry
 
-                        // CAS failed, forget read values (they're MaybeUninit, so it's fine)
-                        // But don't try to drop, just retry
-                        head = actual_head;
-
-                        tail = self.tail.load(Acquire);
-
-                        continue 'top;
-                    }
+                    head = actual_head;
+                    tail = self.tail.load(Acquire);
                 }
             }
         }
@@ -613,9 +610,9 @@ impl<T, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> + Defau
 
     /// Steals many values from the consumer to the `dst`.
     /// Returns the number of values stolen.
-    /// 
+    ///
     /// # Panics
-    /// 
+    ///
     /// If `dst` is not empty.
     pub fn steal_into(&self, dst: &Self) -> usize {
         let mut src_head = self.head.load(Acquire);
@@ -630,7 +627,7 @@ impl<T, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> + Defau
             );
         }
 
-        'top: loop {
+        loop {
             let src_tail = self.tail.load(Acquire);
             let n = Self::len(src_head, src_tail) / 2;
 
@@ -685,6 +682,7 @@ impl<T, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> + Defau
                 src_left,
             );
 
+            // CAS is strong, because we don't want to recopy the values
             let res = self.head.compare_exchange(
                 src_head,
                 src_head.wrapping_add(n as LongNumber),
@@ -703,15 +701,15 @@ impl<T, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> + Defau
                 Err(current_head) => {
                     // another thread has read the same values, full retry
                     src_head = current_head;
-
-                    continue 'top;
                 }
             }
         }
     }
 }
 
-impl<T, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> + Default> Default for SPMCBoundedQueue<T, CAPACITY, AtomicWrapper> {
+impl<T, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> + Default> Default
+    for SPMCBoundedQueue<T, CAPACITY, AtomicWrapper>
+{
     fn default() -> Self {
         Self::new()
     }
@@ -723,6 +721,8 @@ where
     AtomicWrapper: Deref<Target = LongAtomic> + Default,
 {
 }
+
+#[allow(clippy::non_send_fields_in_send_ty, reason = "We guarantee it is Send")]
 unsafe impl<T, const CAPACITY: usize, AtomicWrapper> Send
     for SPMCBoundedQueue<T, CAPACITY, AtomicWrapper>
 where
@@ -765,6 +765,7 @@ macro_rules! generate_spmc_producer_and_consumer {
         /// The producer of the [`SPMCBoundedQueue`].
         pub struct $producer_name<T, const CAPACITY: usize> {
             inner: LightArc<SPMCBoundedQueue<T, CAPACITY, $atomic_wrapper>>,
+            _non_sync: PhantomData<*const ()>,
         }
 
         impl<T: Send, const CAPACITY: usize> Producer<T> for $producer_name<T, CAPACITY> {
@@ -774,43 +775,43 @@ macro_rules! generate_spmc_producer_and_consumer {
             }
 
             #[inline]
-            fn len(&mut self) -> usize {
+            fn len(&self) -> usize {
                 unsafe { self.inner.producer_len() }
             }
 
             #[inline]
-            fn push<SBR: SyncBatchReceiver<T>>(&mut self, value: T, sync_batch_receiver: &SBR) {
+            fn push<SBR: SyncBatchReceiver<T>>(&self, value: T, sync_batch_receiver: &SBR) {
                 unsafe { self.inner.producer_push(value, sync_batch_receiver) };
             }
 
             #[inline]
-            fn maybe_push(&mut self, value: T) -> Result<(), T> {
+            fn maybe_push(&self, value: T) -> Result<(), T> {
                 unsafe { self.inner.producer_maybe_push(value) }
             }
 
             #[inline]
-            fn pop(&mut self) -> Option<T> {
+            fn pop(&self) -> Option<T> {
                 unsafe { self.inner.producer_pop() }
             }
 
             #[inline]
-            fn pop_many(&mut self, dst: &mut [MaybeUninit<T>]) -> usize {
+            fn pop_many(&self, dst: &mut [MaybeUninit<T>]) -> usize {
                 unsafe { self.inner.producer_pop_many(dst) }
             }
 
             #[inline]
-            unsafe fn push_many_unchecked(&mut self, first: &[T], last: &[T]) {
+            unsafe fn push_many_unchecked(&self, first: &[T], last: &[T]) {
                 unsafe { self.inner.producer_push_many_unchecked(first, last) };
             }
 
             #[inline]
-            fn maybe_push_many(&mut self, slice: &[T]) -> Result<(), ()> {
+            unsafe fn maybe_push_many(&self, slice: &[T]) -> Result<(), ()> {
                 unsafe { self.inner.producer_maybe_push_many(slice) }
             }
 
             #[inline]
-            fn push_many<SBR: SyncBatchReceiver<T>>(
-                &mut self,
+            unsafe fn push_many<SBR: SyncBatchReceiver<T>>(
+                &self,
                 slice: &[T],
                 sync_batch_receiver: &SBR,
             ) {
@@ -818,7 +819,17 @@ macro_rules! generate_spmc_producer_and_consumer {
             }
         }
 
-        unsafe impl<T: Send, const CAPACITY: usize> Sync for $producer_name<T, CAPACITY> {}
+        impl<T: Send, const CAPACITY: usize> ConsumerSpawner<T> for $producer_name<T, CAPACITY> {
+            type Consumer = $consumer_name<T, CAPACITY>;
+
+            fn spawn_consumer(&self) -> Self::Consumer {
+                $consumer_name {
+                    inner: self.inner.clone(),
+                    _non_sync: PhantomData,
+                }
+            }
+        }
+
         unsafe impl<T: Send, const CAPACITY: usize> Send for $producer_name<T, CAPACITY> {}
 
         /// The consumer of the [`SPMCBoundedQueue`].
@@ -831,22 +842,22 @@ macro_rules! generate_spmc_producer_and_consumer {
             type AssociatedProducer = $producer_name<T, CAPACITY>;
 
             #[inline]
-            fn capacity(&mut self) -> usize {
+            fn capacity(&self) -> usize {
                 CAPACITY as usize
             }
 
             #[inline]
-            fn len(&mut self) -> usize {
+            fn len(&self) -> usize {
                 self.inner.consumer_len()
             }
 
             #[inline]
-            fn pop_many(&mut self, dst: &mut [MaybeUninit<T>]) -> usize {
+            fn pop_many(&self, dst: &mut [MaybeUninit<T>]) -> usize {
                 self.inner.consumer_pop_many(dst)
             }
 
             #[inline]
-            fn steal_into(&mut self, dst: &mut Self::AssociatedProducer) -> usize {
+            fn steal_into(&self, dst: &Self::AssociatedProducer) -> usize {
                 self.inner.steal_into(&*dst.inner)
             }
         }
@@ -885,6 +896,17 @@ generate_spmc_producer_and_consumer!(SPMCProducer, SPMCConsumer);
 ///
 /// If you want to use only one consumer, look at the single-producer, single-consumer queue.
 ///
+/// # Bounded queue vs. [`unbounded queue`](crate::spmc::new_unbounded)
+///
+/// - [`maybe_push`](Producer::maybe_push), [`maybe_push_many`](Producer::maybe_push_many)
+///   can return an error only for `bounded` queue.
+/// - [`push`](Producer::push), [`push_many`](Producer::push_many)
+///   writes to the [`SyncBatchReceiver`] only for `bounded` queue.
+/// - [`Consumer::steal_into`] and [`Consumer::pop_many`] can pop zero values even if the source
+///   queue is not empty for `unbounded` queue.
+/// - [`Consumer::capacity`] and [`Consumer::len`] can return old values for `unbounded` queue.
+/// - All methods of `bounded` queue work much faster than all methods of `unbounded` queue.
+///
 /// # Cache padding
 ///
 /// Cache padding can improve the performance of the queue many times, but it also requires
@@ -895,7 +917,6 @@ generate_spmc_producer_and_consumer!(SPMCProducer, SPMCConsumer);
 ///
 /// ```
 /// use parcoll::spmc::{new_bounded, Producer, Consumer};
-/// use std::sync::Arc;
 ///
 /// let (mut producer, mut consumer) = new_bounded::<_, 256>();
 /// let consumer2 = consumer.clone(); // You can clone the consumer
@@ -910,13 +931,14 @@ generate_spmc_producer_and_consumer!(SPMCProducer, SPMCConsumer);
 /// assert_eq!(unsafe { slice[0].assume_init() }, 1);
 /// assert_eq!(unsafe { slice[1].assume_init() }, 2);
 /// ```
-pub fn new_bounded<T, const CAPACITY: usize>()
--> (SPMCProducer<T, CAPACITY>, SPMCConsumer<T, CAPACITY>) {
+pub fn new_bounded<T, const CAPACITY: usize>(
+) -> (SPMCProducer<T, CAPACITY>, SPMCConsumer<T, CAPACITY>) {
     let queue = LightArc::new(SPMCBoundedQueue::new());
 
     (
         SPMCProducer {
             inner: queue.clone(),
+            _non_sync: PhantomData,
         },
         SPMCConsumer {
             inner: queue,
@@ -942,6 +964,17 @@ generate_spmc_producer_and_consumer!(
 ///
 /// If you want to use only one consumer, look at the single-producer, single-consumer queue.
 ///
+/// # Bounded queue vs. [`unbounded queue`](crate::spmc::new_unbounded)
+///
+/// - [`maybe_push`](Producer::maybe_push), [`maybe_push_many`](Producer::maybe_push_many)
+///   can return an error only for `bounded` queue.
+/// - [`push`](Producer::push), [`push_many`](Producer::push_many)
+///   writes to the [`SyncBatchReceiver`] only for `bounded` queue.
+/// - [`Consumer::steal_into`] and [`Consumer::pop_many`] can pop zero values even if the source
+///   queue is not empty for `unbounded` queue.
+/// - [`Consumer::capacity`] and [`Consumer::len`] can return old values for `unbounded` queue.
+/// - All methods of `bounded` queue work much faster than all methods of `unbounded` queue.
+///
 /// # Cache padding
 ///
 /// Cache padding can improve the performance of the queue many times, but it also requires
@@ -952,7 +985,6 @@ generate_spmc_producer_and_consumer!(
 ///
 /// ```
 /// use parcoll::spmc::{new_bounded, Producer, Consumer};
-/// use std::sync::Arc;
 ///
 /// let (mut producer, mut consumer) = new_bounded::<_, 256>();
 /// let consumer2 = consumer.clone(); // You can clone the consumer
@@ -976,6 +1008,7 @@ pub fn new_cache_padded_bounded<T, const CAPACITY: usize>() -> (
     (
         CachePaddedSPMCProducer {
             inner: queue.clone(),
+            _non_sync: PhantomData,
         },
         CachePaddedSPMCConsumer {
             inner: queue,
@@ -1012,7 +1045,7 @@ mod tests {
     #[test]
     fn test_spmc_bounded_seq_insertions() {
         let global_queue = MutexVecQueue::new();
-        let (mut producer, _) = new_bounded::<_, CAPACITY>();
+        let (producer, _) = new_bounded::<_, CAPACITY>();
 
         for i in 0..CAPACITY * 100 {
             producer.push(i, &global_queue);
@@ -1042,7 +1075,7 @@ mod tests {
         const TRIES: usize = 10;
 
         let global_queue = MutexVecQueue::new();
-        let (mut producer1, mut consumer) = new_bounded::<_, CAPACITY>();
+        let (producer1, consumer) = new_bounded::<_, CAPACITY>();
         let (mut producer2, _) = new_bounded::<_, CAPACITY>();
 
         let mut stolen = VecDeque::new();
@@ -1078,14 +1111,16 @@ mod tests {
         const N: usize = BATCH_SIZE * 100;
 
         let global_queue = MutexVecQueue::new();
-        let (mut producer, mut consumer) = new_bounded::<_, CAPACITY>();
+        let (producer, consumer) = new_bounded::<_, CAPACITY>();
 
         for i in 0..N / BATCH_SIZE / 2 {
             let slice = (0..BATCH_SIZE)
                 .map(|j| i * BATCH_SIZE + j)
                 .collect::<Vec<_>>();
 
-            producer.maybe_push_many(&*slice).unwrap();
+            unsafe {
+                producer.maybe_push_many(&*slice).unwrap();
+            }
 
             let mut slice = [MaybeUninit::uninit(); BATCH_SIZE];
             producer.pop_many(slice.as_mut_slice());
@@ -1102,7 +1137,9 @@ mod tests {
                 .map(|j| i * BATCH_SIZE + j)
                 .collect::<Vec<_>>();
 
-            producer.push_many(&*slice, &global_queue);
+            unsafe {
+                producer.push_many(&*slice, &global_queue);
+            }
 
             assert!(global_queue.is_empty());
 
