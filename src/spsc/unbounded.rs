@@ -178,8 +178,7 @@ pub(crate) struct SPSCUnboundedQueue<
     last_version: NaiveRWLock<LightArc<Version<T>>>,
 }
 
-impl<T, AtomicU32Wrapper, AtomicU64Wrapper>
-SPSCUnboundedQueue<T, AtomicU32Wrapper, AtomicU64Wrapper>
+impl<T, AtomicU32Wrapper, AtomicU64Wrapper> SPSCUnboundedQueue<T, AtomicU32Wrapper, AtomicU64Wrapper>
 where
     AtomicU32Wrapper: Deref<Target = AtomicU32> + Default,
     AtomicU64Wrapper: Deref<Target = AtomicU64> + Default,
@@ -273,8 +272,7 @@ where
 }
 
 // Producer
-impl<T, AtomicU32Wrapper, AtomicU64Wrapper>
-SPSCUnboundedQueue<T, AtomicU32Wrapper, AtomicU64Wrapper>
+impl<T, AtomicU32Wrapper, AtomicU64Wrapper> SPSCUnboundedQueue<T, AtomicU32Wrapper, AtomicU64Wrapper>
 where
     AtomicU32Wrapper: Deref<Target = AtomicU32> + Default,
     AtomicU64Wrapper: Deref<Target = AtomicU64> + Default,
@@ -590,11 +588,55 @@ where
         self.tail_and_version
             .store(pack_version_and_tail(version.id(), tail), Release);
     }
+
+    /// Read the doc at [`Producer::copy_and_commit_if`].
+    ///
+    /// # Safety
+    ///
+    /// The called should be the only producer and the safety conditions
+    /// from [`Producer::copy_and_commit_if`].
+    ///
+    /// # Panics
+    ///
+    /// Read the doc at [`Producer::copy_and_commit_if`].
+    unsafe fn producer_copy_and_commit_if<FSuccess, FError>(
+        &self,
+        left: &[T],
+        right: &[T],
+        condition: impl FnOnce() -> Result<FSuccess, FError>,
+        version: &mut CachedVersion<T>,
+    ) -> Result<FSuccess, FError> {
+        debug_assert!(left.len() + right.len() + self.producer_len() <= version.capacity());
+
+        let mut new_tail = Self::copy_slice(
+            unsafe { version.thin_mut_ptr().cast() },
+            unsafe { self.unsync_load_tail() }, // only producer can change tail
+            right,
+            version,
+        );
+        new_tail = Self::copy_slice(
+            unsafe { version.thin_mut_ptr().cast() },
+            new_tail,
+            left,
+            version,
+        );
+
+        let should_commit = condition();
+        match should_commit {
+            Ok(res) => {
+                self
+                    .tail_and_version
+                    .store(pack_version_and_tail(version.id(), new_tail), Release);
+
+                Ok(res)
+            }
+            Err(err) => Err(err),
+        }
+    }
 }
 
 // Consumers
-impl<T, AtomicU32Wrapper, AtomicU64Wrapper>
-SPSCUnboundedQueue<T, AtomicU32Wrapper, AtomicU64Wrapper>
+impl<T, AtomicU32Wrapper, AtomicU64Wrapper> SPSCUnboundedQueue<T, AtomicU32Wrapper, AtomicU64Wrapper>
 where
     AtomicU32Wrapper: Deref<Target = AtomicU32> + Default,
     AtomicU64Wrapper: Deref<Target = AtomicU64> + Default,
@@ -714,22 +756,11 @@ where
     /// if the producer is preempted while pushing.
     fn steal_into(
         &self,
-        dst: &Self,
+        dst: &impl Producer<T>,
         src_version: &mut CachedVersion<T>,
-        dst_version: &mut CachedVersion<T>,
     ) -> usize {
         let (mut src_last_version_id, mut src_tail) = self.sync_load_version_and_tail(Acquire);
         let src_head = unsafe { self.head.unsync_load() }; // only producer can change head
-        let dst_tail = unsafe { dst.unsync_load_tail() }; // only producer can change tail
-
-        if cfg!(debug_assertions) {
-            let dst_head = dst.head.load(Relaxed);
-
-            assert_eq!(
-                dst_head, dst_tail,
-                "steal_into should not be called when dst is not empty"
-            );
-        }
 
         loop {
             if unlikely(src_version.id() < src_last_version_id) {
@@ -750,7 +781,11 @@ where
                 return 0;
             }
 
-            let n = n.min(dst_version.capacity());
+            if cfg!(debug_assertions) {
+                assert!(dst.is_empty(), "dst must be empty when stealing");
+            }
+
+            let n = n.min(dst.capacity()); // dst is empty, so the capacity is the number of free slots
             let src_head_idx = (src_head & src_version.mask()) as usize;
 
             let (src_right, src_left): (&[T], &[T]) = unsafe {
@@ -771,26 +806,13 @@ where
                 }
             };
 
-            Self::copy_slice(
-                unsafe { dst_version.thin_mut_ptr() }.cast::<T>(),
-                dst_tail,
-                src_right,
-                dst_version,
-            );
-            Self::copy_slice(
-                unsafe { dst_version.thin_mut_ptr() }.cast::<T>(),
-                dst_tail.wrapping_add(src_right.len() as u32),
-                src_left,
-                dst_version,
-            );
-            
-            self.head.store(src_head.wrapping_add(n as u32), Release);
+            unsafe {
+                let _ = dst.copy_and_commit_if::<_, _, ()>(src_right, src_left, || {
+                    self.head.store(src_head.wrapping_add(n as u32), Release);
 
-            // Success, we can move dst tail and return
-            dst.tail_and_version.store(
-                pack_version_and_tail(dst_version.id(), dst_tail.wrapping_add(n as u32)),
-                Release,
-            );
+                    Ok(())
+                });
+            }
 
             return n;
         }
@@ -914,6 +936,13 @@ macro_rules! generate_spsc_producer_and_consumer {
 
                 Ok(())
             }
+
+            unsafe fn copy_and_commit_if<F, FSuccess, FError>(&self, right: &[T], left: &[T], f: F) -> Result<FSuccess, FError>
+            where
+                F: FnOnce() -> Result<FSuccess, FError>
+            {
+                unsafe { self.inner.producer_copy_and_commit_if(right, left, f, self.cached_version()) }
+            }
         }
 
         #[allow(clippy::non_send_fields_in_send_ty, reason = "We guarantee it is Send")]
@@ -936,8 +965,6 @@ macro_rules! generate_spsc_producer_and_consumer {
         }
 
         impl<T: Send> Consumer<T> for $consumer_name<T> {
-            type AssociatedProducer = $producer_name<T>;
-
             #[inline]
             fn capacity(&self) -> usize {
                 self.inner.consumer_capacity(self.cached_version())
@@ -953,12 +980,10 @@ macro_rules! generate_spsc_producer_and_consumer {
                 self.inner.consumer_pop_many(dst, self.cached_version())
             }
 
-            #[inline]
-            fn steal_into(&self, dst: &Self::AssociatedProducer) -> usize {
+            fn steal_into(&self, dst: &impl Producer<T>) -> usize {
                 self.inner.steal_into(
-                    &*dst.inner,
+                    dst,
                     self.cached_version(),
-                    dst.cached_version(),
                 )
             }
         }

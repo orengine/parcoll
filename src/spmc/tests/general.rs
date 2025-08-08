@@ -39,7 +39,7 @@ static RAND: AtomicUsize = AtomicUsize::new(4);
 fn test_spmc_multi_threaded_steal<Producer, Consumer>(creator: fn() -> (Producer, Consumer))
 where
     Producer: ProducerExt<TestValue<usize>> + Send + 'static,
-    Consumer: ConsumerExt<TestValue<usize>, AssociatedProducer = Producer> + Send + 'static,
+    Consumer: ConsumerExt<TestValue<usize>> + Send + 'static,
 {
     const N: usize = if cfg!(miri) { 200 } else { 1_000_000 };
     const CHECK_TO: usize = if cfg!(feature = "always_steal") {
@@ -156,7 +156,7 @@ where
 fn test_spmc_multi_threaded_pop_many<Producer, Consumer>(creator: fn() -> (Producer, Consumer))
 where
     Producer: ProducerExt<TestValue<usize>> + Send + 'static,
-    Consumer: ConsumerExt<TestValue<usize>, AssociatedProducer = Producer> + Send + 'static,
+    Consumer: ConsumerExt<TestValue<usize>> + Send + 'static,
 {
     const N: usize = if cfg!(miri) { 200 } else { 1_000_000 };
     const BATCH_SIZE: usize = 5;

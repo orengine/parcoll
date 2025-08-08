@@ -704,6 +704,51 @@ where
         self.tail_and_version
             .store(pack_version_and_tail(version.id(), tail), Release);
     }
+
+    /// Read the doc at [`Producer::copy_and_commit_if`].
+    ///
+    /// # Safety
+    ///
+    /// The called should be the only producer and the safety conditions
+    /// from [`Producer::copy_and_commit_if`].
+    ///
+    /// # Panics
+    ///
+    /// Read the doc at [`Producer::copy_and_commit_if`].
+    unsafe fn producer_copy_and_commit_if<FSuccess, FError>(
+        &self,
+        left: &[T],
+        right: &[T],
+        condition: impl FnOnce() -> Result<FSuccess, FError>,
+        version: &mut CachedVersion<T>,
+    ) -> Result<FSuccess, FError> {
+        debug_assert!(left.len() + right.len() + self.producer_len() <= version.capacity());
+
+        let mut new_tail = Self::copy_slice(
+            unsafe { version.thin_mut_ptr().cast() },
+            unsafe { self.unsync_load_tail() }, // only producer can change tail
+            right,
+            version,
+        );
+        new_tail = Self::copy_slice(
+            unsafe { version.thin_mut_ptr().cast() },
+            new_tail,
+            left,
+            version,
+        );
+
+        let should_commit = condition();
+        match should_commit {
+            Ok(res) => {
+                self
+                    .tail_and_version
+                    .store(pack_version_and_tail(version.id(), new_tail), Release);
+
+                Ok(res)
+            }
+            Err(err) => Err(err),
+        }
+    }
 }
 
 // Consumers
@@ -867,22 +912,11 @@ where
     /// if the producer is preempted while pushing.
     fn steal_into(
         &self,
-        dst: &Self,
+        dst: &impl Producer<T>,
         src_version: &mut CachedVersion<T>,
-        dst_version: &mut CachedVersion<T>,
     ) -> usize {
         let mut src_head = self.head.load(Acquire);
         let (mut src_last_version_id, mut src_tail) = self.sync_load_version_and_tail(Acquire);
-        let dst_tail = unsafe { dst.unsync_load_tail() }; // only producer can change tail
-
-        if cfg!(debug_assertions) {
-            let dst_head = dst.head.load(Relaxed);
-
-            assert_eq!(
-                dst_head, dst_tail,
-                "steal_into should not be called when dst is not empty"
-            );
-        }
 
         loop {
             if unlikely(src_version.id() < src_last_version_id) {
@@ -894,6 +928,10 @@ where
                 (src_last_version_id, src_tail) = self.sync_load_version_and_tail(Acquire);
 
                 continue;
+            }
+
+            if cfg!(debug_assertions) {
+                assert!(dst.is_empty(), "dst must be empty when stealing");
             }
 
             let n = Self::len(src_head, src_tail) / 2;
@@ -914,7 +952,8 @@ where
                 return 0;
             }
 
-            let n = n.min(dst_version.capacity());
+            let n = n.min(dst.capacity()); // dst is empty, so the capacity is the number of free slots
+
             let src_head_idx = (src_head & src_version.mask()) as usize;
 
             let (src_right, src_left): (&[T], &[T]) = unsafe {
@@ -935,38 +974,19 @@ where
                 }
             };
 
-            // We optimistically copy the values from the buffer into the dst.
-            // On CAS failure, we forget the copied values and try again.
-            // It is safe because we can concurrently read from the head.
-            Self::copy_slice(
-                unsafe { dst_version.thin_mut_ptr() }.cast::<T>(),
-                dst_tail,
-                src_right,
-                dst_version,
-            );
-            Self::copy_slice(
-                unsafe { dst_version.thin_mut_ptr() }.cast::<T>(),
-                dst_tail.wrapping_add(src_right.len() as u32),
-                src_left,
-                dst_version,
-            );
+            let cas_closure = || {
+                // CAS is strong because we don't want to recopy the values
+                self.head.compare_exchange(
+                    src_head,
+                    src_head.wrapping_add(n as u32),
+                    Release,
+                    Acquire,
+                )
+            };
 
-            // CAS is strong because we don't want to recopy the values
-            let res = self.head.compare_exchange(
-                src_head,
-                src_head.wrapping_add(n as u32),
-                Release,
-                Acquire,
-            );
-
+            let res = unsafe { dst.copy_and_commit_if(src_right, src_left, cas_closure) };
             match res {
                 Ok(_) => {
-                    // Success, we can move dst tail and return
-                    dst.tail_and_version.store(
-                        pack_version_and_tail(dst_version.id(), dst_tail.wrapping_add(n as u32)),
-                        Release,
-                    );
-
                     return n;
                 }
                 Err(current_head) => {
@@ -1125,6 +1145,14 @@ macro_rules! generate_spmc_producer_and_consumer {
                         .producer_push_many(slice, self.cached_version())
                 };
             }
+
+            #[inline]
+            unsafe fn copy_and_commit_if<F, FSuccess, FError>(&self, left: &[T], right: &[T], f: F) -> Result<FSuccess, FError>
+            where
+                F: FnOnce() -> Result<FSuccess, FError>,
+            {
+                unsafe { self.inner.producer_copy_and_commit_if(left, right, f, self.cached_version()) }
+            }
         }
 
         impl<T: Send> ConsumerSpawner<T> for $producer_name<T> {
@@ -1159,8 +1187,6 @@ macro_rules! generate_spmc_producer_and_consumer {
         }
 
         impl<T: Send> Consumer<T> for $consumer_name<T> {
-            type AssociatedProducer = $producer_name<T>;
-
             #[inline]
             fn capacity(&self) -> usize {
                 self.inner.consumer_capacity(self.cached_version())
@@ -1176,12 +1202,10 @@ macro_rules! generate_spmc_producer_and_consumer {
                 self.inner.consumer_pop_many(dst, self.cached_version())
             }
 
-            #[inline]
-            fn steal_into(&self, dst: &Self::AssociatedProducer) -> usize {
+            fn steal_into(&self, dst: &impl Producer<T>) -> usize {
                 self.inner.steal_into(
-                    &*dst.inner,
+                    dst,
                     self.cached_version(),
-                    dst.cached_version(),
                 )
             }
         }

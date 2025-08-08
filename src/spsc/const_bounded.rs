@@ -222,6 +222,48 @@ impl<T, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> + Defau
 
         Ok(())
     }
+
+    /// Read the doc at [`Producer::copy_and_commit_if`].
+    ///
+    /// # Safety
+    ///
+    /// The called should be the only producer and the safety conditions
+    /// from [`Producer::copy_and_commit_if`].
+    ///
+    /// # Panics
+    ///
+    /// Read the doc at [`Producer::copy_and_commit_if`].
+    unsafe fn producer_copy_and_commit_if<FSuccess, FError>(
+        &self,
+        left: &[T],
+        right: &[T],
+        condition: impl FnOnce() -> Result<FSuccess, FError>,
+    ) -> Result<FSuccess, FError> {
+        debug_assert!(left.len() + right.len() + self.producer_len() <= CAPACITY);
+
+        let mut new_tail = Self::copy_slice(
+            self.buffer_mut_thin_ptr().cast(),
+            unsafe { self.tail.unsync_load() }, // only producer can change tail
+            right,
+        );
+        new_tail = Self::copy_slice(
+            self.buffer_mut_thin_ptr().cast(),
+            new_tail,
+            left,
+        );
+
+        let should_commit = condition();
+        match should_commit {
+            Ok(res) => {
+                self
+                    .tail
+                    .store(new_tail, Release);
+
+                Ok(res)
+            }
+            Err(err) => Err(err),
+        }
+    }
 }
 
 // Consumers
@@ -290,21 +332,18 @@ impl<T, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> + Defau
     /// # Panics
     ///
     /// If `dst` is not empty.
-    pub unsafe fn steal_into(&self, dst: &Self) -> usize {
-        let src_tail = self.tail.load(Acquire);
-        let src_head = unsafe { self.head.unsync_load() }; // only consumer can change head
-        let dst_tail = unsafe { dst.tail.unsync_load() }; // only producer can change tail
-
+    pub unsafe fn steal_into(&self, dst: &impl Producer<T>) -> usize {
         if cfg!(debug_assertions) {
-            let dst_head = dst.head.load(Relaxed);
-
-            assert_eq!(
-                dst_head, dst_tail,
+            assert!(
+                dst.is_empty(),
                 "steal_into should not be called when dst is not empty"
             );
         }
-
+        
+        let src_tail = self.tail.load(Acquire);
+        let src_head = unsafe { self.head.unsync_load() }; // only consumer can change head
         let n = Self::len(src_head, src_tail) / 2;
+        
         if !cfg!(feature = "always_steal") && n < 4 || n == 0 {
             // we don't steal less than 4 by default
             // because else we may lose more because of cache locality and NUMA awareness
@@ -330,22 +369,15 @@ impl<T, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> + Defau
                 )
             }
         };
-
-        Self::copy_slice(
-            dst.buffer_mut_thin_ptr().cast::<T>(),
-            dst_tail % CAPACITY as LongNumber,
-            src_right,
-        );
-        Self::copy_slice(
-            dst.buffer_mut_thin_ptr().cast::<T>(),
-            (dst_tail.wrapping_add(src_right.len() as LongNumber)) % CAPACITY as LongNumber,
-            src_left,
-        );
-
-        self.head
-            .store(src_head.wrapping_add(n as LongNumber), Release);
-        dst.tail
-            .store(dst_tail.wrapping_add(n as LongNumber), Release);
+        
+        unsafe {
+            let _ = dst.copy_and_commit_if::<_, _, ()>(src_right, src_left, || {
+                self.head
+                    .store(src_head.wrapping_add(n as LongNumber), Release);
+                
+                Ok(())
+            });
+        }
 
         n
     }
@@ -436,6 +468,13 @@ macro_rules! generate_spsc_producer_and_consumer {
             unsafe fn maybe_push_many(&self, slice: &[T]) -> Result<(), ()> {
                 unsafe { self.inner.producer_maybe_push_many(slice) }
             }
+            
+            unsafe fn copy_and_commit_if<F, FSuccess, FError>(&self, right: &[T], left: &[T], f: F) -> Result<FSuccess, FError>
+            where
+                F: FnOnce() -> Result<FSuccess, FError>
+            {
+                unsafe { self.inner.producer_copy_and_commit_if(right, left, f) }
+            }
         }
 
         unsafe impl<T: Send, const CAPACITY: usize> Send for $producer_name<T, CAPACITY> {}
@@ -447,8 +486,6 @@ macro_rules! generate_spsc_producer_and_consumer {
         }
 
         impl<T: Send, const CAPACITY: usize> Consumer<T> for $consumer_name<T, CAPACITY> {
-            type AssociatedProducer = $producer_name<T, CAPACITY>;
-
             #[inline]
             fn capacity(&self) -> usize {
                 CAPACITY as usize
@@ -463,10 +500,9 @@ macro_rules! generate_spsc_producer_and_consumer {
             fn pop_many(&self, dst: &mut [MaybeUninit<T>]) -> usize {
                 unsafe { self.inner.consumer_pop_many(dst) }
             }
-
-            #[inline]
-            fn steal_into(&self, dst: &Self::AssociatedProducer) -> usize {
-                unsafe { self.inner.steal_into(&*dst.inner) }
+            
+            fn steal_into(&self, dst: &impl Producer<T>) -> usize {
+                unsafe { self.inner.steal_into(dst) }
             }
         }
 

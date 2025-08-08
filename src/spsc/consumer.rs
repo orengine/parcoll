@@ -1,14 +1,11 @@
 //! This module provides the [`Consumer`] trait for the single-producer, single-consumer queue.
-use crate::spsc::Producer;
 use std::mem::MaybeUninit;
+use crate::spsc::Producer;
 
 /// A consumer of the single-producer, single-consumer queue.
 ///
 /// Because it is the only consumer, it can push and pop values very quickly.
 pub trait Consumer<T> {
-    /// An associated [`producer`](Producer) with this consumer.
-    type AssociatedProducer: Producer<T>;
-
     /// Returns the capacity of the queue.
     fn capacity(&self) -> usize;
 
@@ -44,5 +41,5 @@ pub trait Consumer<T> {
     /// It requires that the other queue to be empty.
     /// Expected to steal the half of the queue,
     /// but other implementations may steal another number of values.
-    fn steal_into(&self, dst: &Self::AssociatedProducer) -> usize;
+    fn steal_into(&self, dst: &impl Producer<T>) -> usize;
 }

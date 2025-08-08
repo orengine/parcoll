@@ -8,9 +8,6 @@ use std::mem::MaybeUninit;
 /// [`Producers`](Producer) doesn't implement this trait but also can pop values
 /// and even do it faster.
 pub trait Consumer<T>: Clone {
-    /// An associated [`producer`](Producer) with this consumer.
-    type AssociatedProducer: Producer<T>;
-
     /// Returns the capacity of the queue.
     fn capacity(&self) -> usize;
 
@@ -46,5 +43,5 @@ pub trait Consumer<T>: Clone {
     /// It requires that the other queue to be empty.
     /// Expected to steal the half of the queue,
     /// but other implementations may steal another number of values.
-    fn steal_into(&self, dst: &Self::AssociatedProducer) -> usize;
+    fn steal_into(&self, dst: &impl Producer<T>) -> usize;
 }
