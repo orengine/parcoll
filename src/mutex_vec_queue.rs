@@ -1,9 +1,9 @@
 use crate::hints::{assert_hint, unlikely};
 use crate::loom_bindings::sync::{Arc, Mutex};
-use crate::spmc::Producer;
-use crate::sync_batch_receiver::SyncBatchReceiver;
+use crate::batch_receiver::BatchReceiver;
 use std::ptr::slice_from_raw_parts;
 use std::{mem, ptr};
+use crate::Producer;
 
 pub(crate) struct VecQueue<T> {
     ptr: *mut T,
@@ -246,7 +246,7 @@ impl<T> Default for MutexVecQueue<T> {
     }
 }
 
-impl<T> SyncBatchReceiver<T> for MutexVecQueue<T> {
+impl<T> BatchReceiver<T> for MutexVecQueue<T> {
     fn push_many_and_one(&self, first: &[T], last: &[T], value: T) {
         let mut inner = self.inner.lock();
 
@@ -292,6 +292,7 @@ impl<T> SyncBatchReceiver<T> for MutexVecQueue<T> {
 
 #[cfg(test)]
 mod tests {
+    use crate::spmc_producer::SPMCProducer;
     use super::*;
 
     const N: usize = 100_000;

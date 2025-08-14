@@ -10,21 +10,21 @@ use crate::light_arc::LightArc;
 use crate::number_types::{
     CachePaddedLongAtomic, LongAtomic, LongNumber, NotCachePaddedLongAtomic,
 };
-use crate::spsc::{Consumer, Producer};
 use std::marker::PhantomData;
 use std::mem::{needs_drop, MaybeUninit};
 use std::ops::Deref;
 use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
 use std::{ptr, slice};
-
+use crate::{LockFreePopErr, LockFreePushErr, LockFreePushManyErr};
+use crate::spmc_producer::SPMCProducer;
 // Don't care about ABA because we can count that 16-bit and 32-bit processors never
 // insert + read (2 ^ 16) - 1 or (2 ^ 32) - 1 values while some consumer is preempted.
 // For 32-bit:
-// If we guess, it always put and get 10 values by time and do it in
+// If we guess, it always puts and gets 10 values by time and does it in
 // 20 nanoseconds (it becomes slower by adding new threads), then the thread needs to be preempted
-// for 8.5 seconds + all the time the other thread is preempted while the other thread only works with this queue.
+// for 8.5 seconds and all the time the other thread is preempted while the other thread only works with this queue.
 // For 16-bit:
-// We guess, it never has so much concurrency.
+// We guess it never has so much concurrency.
 // For 64-bit it is unrealistic to have the ABA problem.
 
 // Reads from the head, writes to the tail.
@@ -38,13 +38,13 @@ use std::{ptr, slice};
 ///
 /// It accepts the atomic wrapper as a generic parameter.
 /// It allows using cache-padded atomics or not.
-/// You should create types aliases not to write this large type name.
+/// You should create type aliases not to write this large type name.
 ///
 /// # Using directly the [`SPSCBoundedQueue`] vs. using [`new_bounded`] or [`new_cache_padded_bounded`].
 ///
 /// Functions [`new_bounded`] and [`new_cache_padded_bounded`] allocate the
 /// [`SPSCBoundedQueue`] on the heap in [`LightArc`] and provide separate producer and consumer.
-/// It hurts the performance if you don't need to allocate the queue separately, but improve
+/// It hurts the performance if you don't need to allocate the queue separately but improves 
 /// the readability when you need to separate producer and consumer logic and share them.
 ///
 /// It doesn't implement the [`Producer`] and [`Consumer`] traits because all producer and consumer
@@ -57,7 +57,7 @@ pub struct SPSCBoundedQueue<
 > {
     tail: AtomicWrapper,
     head: AtomicWrapper,
-    buffer: *mut [MaybeUninit<T>; CAPACITY],
+    buffer: [MaybeUninit<T>; CAPACITY],
 }
 
 impl<T, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> + Default>
@@ -68,7 +68,7 @@ impl<T, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> + Defau
         debug_assert!(size_of::<MaybeUninit<T>>() == size_of::<T>()); // Assume that we can just cast it
 
         Self {
-            buffer: Box::into_raw(Box::new([const { MaybeUninit::uninit() }; CAPACITY])),
+            buffer: [const { MaybeUninit::uninit() }; CAPACITY],
             tail: AtomicWrapper::default(),
             head: AtomicWrapper::default(),
         }
@@ -82,12 +82,12 @@ impl<T, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> + Defau
 
     /// Returns a pointer to the buffer.
     fn buffer_thin_ptr(&self) -> *const MaybeUninit<T> {
-        unsafe { &*self.buffer }.as_ptr()
+        (&raw const self.buffer) as *const _
     }
 
     /// Returns a mutable pointer to the buffer.
     fn buffer_mut_thin_ptr(&self) -> *mut MaybeUninit<T> {
-        unsafe { &mut *self.buffer }.as_mut_ptr()
+        (&raw const self.buffer).cast_mut() as *mut _
     }
 
     /// Returns the number of elements in the queue.
@@ -129,11 +129,11 @@ impl<T, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> + Defau
     ///
     /// # Safety
     ///
-    /// The called should be the only producer.
+    /// This method should be called the only producer.
     #[inline]
     pub unsafe fn producer_len(&self) -> usize {
         let head = self.head.load(Relaxed);
-        let tail = unsafe { self.tail.unsync_load() }; // only producer can change tail
+        let tail = unsafe { self.tail.unsync_load() }; // only the producer can change tail
 
         Self::len(head, tail)
     }
@@ -142,7 +142,7 @@ impl<T, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> + Defau
     ///
     /// # Safety
     ///
-    /// The called should be the only producer and the queue should not be full.
+    /// This method should be called the only producer, and the queue should not be full.
     #[inline(always)]
     pub unsafe fn push_unchecked(&self, value: T, tail: LongNumber) {
         unsafe {
@@ -158,11 +158,11 @@ impl<T, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> + Defau
     ///
     /// # Safety
     ///
-    /// The called should be the only producer.
+    /// This method should be called the only producer.
     #[inline]
     pub unsafe fn producer_maybe_push(&self, value: T) -> Result<(), T> {
         let head = self.head.load(Acquire);
-        let tail = unsafe { self.tail.unsync_load() }; // only producer can change tail
+        let tail = unsafe { self.tail.unsync_load() }; // only the producer can change tail
 
         if unlikely(Self::len(head, tail) == CAPACITY) {
             return Err(value);
@@ -180,19 +180,19 @@ impl<T, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> + Defau
     ///
     /// # Safety
     ///
-    /// The called should be the only producer and the space is enough.
+    /// This method should be called the only producer, and the space is enough.
     #[inline]
     pub unsafe fn producer_push_many_unchecked(&self, first: &[T], last: &[T]) {
         if cfg!(debug_assertions) {
             let head = self.head.load(Acquire);
-            let tail = unsafe { self.tail.unsync_load() }; // only producer can change tail
+            let tail = unsafe { self.tail.unsync_load() }; // only the producer can change tail
 
             debug_assert!(Self::len(head, tail) + first.len() + last.len() <= CAPACITY);
         }
 
         // It is SPSC, and it is expected that the capacity is enough.
 
-        let mut tail = unsafe { self.tail.unsync_load() }; // only producer can change tail
+        let mut tail = unsafe { self.tail.unsync_load() }; // only the producer can change tail
 
         tail = Self::copy_slice(self.buffer_mut_thin_ptr().cast(), tail, first);
         tail = Self::copy_slice(self.buffer_mut_thin_ptr().cast(), tail, last);
@@ -204,11 +204,11 @@ impl<T, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> + Defau
     ///
     /// # Safety
     ///
-    /// The called should be the only producer.
+    /// This method should be called the only producer.
     #[inline]
     pub unsafe fn producer_maybe_push_many(&self, slice: &[T]) -> Result<(), ()> {
         let head = self.head.load(Acquire);
-        let mut tail = unsafe { self.tail.unsync_load() }; // only producer can change tail
+        let mut tail = unsafe { self.tail.unsync_load() }; // only the producer can change tail
 
         if unlikely(Self::len(head, tail) + slice.len() > CAPACITY) {
             return Err(()); // don't have enough space
@@ -243,7 +243,7 @@ impl<T, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> + Defau
 
         let mut new_tail = Self::copy_slice(
             self.buffer_mut_thin_ptr().cast(),
-            unsafe { self.tail.unsync_load() }, // only producer can change tail
+            unsafe { self.tail.unsync_load() }, // only the producer can change tail
             right,
         );
         new_tail = Self::copy_slice(
@@ -274,7 +274,7 @@ impl<T, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> + Defau
     ///
     /// # Safety
     ///
-    /// The called should be the only consumer.
+    /// This method should be called the only producer.
     #[inline]
     pub unsafe fn consumer_len(&self) -> usize {
         let tail = self.tail.load(Relaxed);
@@ -288,7 +288,7 @@ impl<T, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> + Defau
     ///
     /// # Safety
     ///
-    /// The called should be the only consumer.
+    /// This method should be called the only producer.
     #[inline]
     pub unsafe fn consumer_pop_many(&self, dst: &mut [MaybeUninit<T>]) -> usize {
         let tail = self.tail.load(Acquire);
@@ -327,12 +327,12 @@ impl<T, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> + Defau
     ///
     /// # Safety
     ///
-    /// The called should be the only consumer.
+    /// This method should be called the only producer.
     ///
     /// # Panics
     ///
     /// If `dst` is not empty.
-    pub unsafe fn steal_into(&self, dst: &impl Producer<T>) -> usize {
+    pub unsafe fn steal_into(&self, dst: &impl SPMCProducer<T>) -> usize {
         if cfg!(debug_assertions) {
             assert!(
                 dst.is_empty(),
@@ -410,7 +410,7 @@ where
     AtomicWrapper: Deref<Target = LongAtomic> + Default,
 {
     fn drop(&mut self) {
-        // While dropping there is no concurrency
+        // While dropping, there is no concurrency
 
         if needs_drop::<T>() {
             let mut head = unsafe { self.head.unsync_load() };
@@ -429,8 +429,6 @@ where
                 head = head.wrapping_add(1);
             }
         }
-
-        unsafe { drop(Box::from_raw(self.buffer)) };
     }
 }
 
@@ -442,8 +440,8 @@ macro_rules! generate_spsc_producer_and_consumer {
             inner: LightArc<SPSCBoundedQueue<T, CAPACITY, $atomic_wrapper>>,
             _non_sync: PhantomData<*const ()>,
         }
-
-        impl<T: Send, const CAPACITY: usize> Producer<T> for $producer_name<T, CAPACITY> {
+        
+        impl<T: Send, const CAPACITY: usize> $crate::Producer<T> for $producer_name<T, CAPACITY> {
             #[inline]
             fn capacity(&self) -> usize {
                 CAPACITY as usize
@@ -468,7 +466,9 @@ macro_rules! generate_spsc_producer_and_consumer {
             unsafe fn maybe_push_many(&self, slice: &[T]) -> Result<(), ()> {
                 unsafe { self.inner.producer_maybe_push_many(slice) }
             }
-            
+        }
+
+        impl<T: Send, const CAPACITY: usize> $crate::single_producer::SingleProducer<T> for $producer_name<T, CAPACITY> {
             unsafe fn copy_and_commit_if<F, FSuccess, FError>(&self, right: &[T], left: &[T], f: F) -> Result<FSuccess, FError>
             where
                 F: FnOnce() -> Result<FSuccess, FError>
@@ -476,6 +476,14 @@ macro_rules! generate_spsc_producer_and_consumer {
                 unsafe { self.inner.producer_copy_and_commit_if(right, left, f) }
             }
         }
+        
+        impl<T: Send, const CAPACITY: usize> $crate::LockFreeProducer<T> for $producer_name<T, CAPACITY> {
+            unsafe fn lock_free_maybe_push_many(&self, slice: &[T]) -> Result<(), LockFreePushManyErr> {
+                self.maybe_push_many(slice).map_err(|_| $crate::lock_free_errors::LockFreePushManyErr::NotEnoughSpace)
+            }
+        }
+        
+        impl<T: Send, const CAPACITY: usize> $crate::single_producer::SingleLockFreeProducer<T> for $producer_name<T, CAPACITY> {}
 
         unsafe impl<T: Send, const CAPACITY: usize> Send for $producer_name<T, CAPACITY> {}
 
@@ -485,7 +493,7 @@ macro_rules! generate_spsc_producer_and_consumer {
             _non_sync: PhantomData<*const ()>,
         }
 
-        impl<T: Send, const CAPACITY: usize> Consumer<T> for $consumer_name<T, CAPACITY> {
+        impl<T: Send, const CAPACITY: usize> $crate::Consumer<T> for $consumer_name<T, CAPACITY> {
             #[inline]
             fn capacity(&self) -> usize {
                 CAPACITY as usize
@@ -495,16 +503,32 @@ macro_rules! generate_spsc_producer_and_consumer {
             fn len(&self) -> usize {
                 unsafe { self.inner.consumer_len() }
             }
-
-            #[inline]
+            
             fn pop_many(&self, dst: &mut [MaybeUninit<T>]) -> usize {
                 unsafe { self.inner.consumer_pop_many(dst) }
             }
-            
-            fn steal_into(&self, dst: &impl Producer<T>) -> usize {
+
+            #[inline(never)]
+            fn steal_into(&self, dst: &impl $crate::single_consumer::SingleProducer<T>) -> usize {
                 unsafe { self.inner.steal_into(dst) }
             }
         }
+        
+        impl<T: Send, const CAPACITY: usize> $crate::LockFreeConsumer<T> for $consumer_name<T, CAPACITY> {
+            #[inline]
+            fn lock_free_pop_many(&self, dst: &mut [MaybeUninit<T>]) -> (usize, bool) {
+                (self.pop_many(dst), false)
+            }
+            
+            #[inline(never)]
+            fn lock_free_steal(&self, dst: &impl Producer<T>) -> (usize, bool) {
+                (self.steal_into(dst), false)                
+            }
+        }
+        
+        impl<T: Send, const CAPACITY: usize> $crate::single_consumer::SingleConsumer<T> for $consumer_name<T, CAPACITY> {}
+        
+        impl<T: Send, const CAPACITY: usize> $crate::single_consumer::SingleLockFreeConsumer<T> for $consumer_name<T, CAPACITY> {}
 
         unsafe impl<T: Send, const CAPACITY: usize> Send for $consumer_name<T, CAPACITY> {}
     };
@@ -547,7 +571,8 @@ generate_spsc_producer_and_consumer!(SPSCProducer, SPSCConsumer);
 /// # Examples
 ///
 /// ```
-/// use parcoll::spsc::{new_bounded, Producer, Consumer};
+/// use parcoll::spsc::new_bounded;
+/// use parcoll::{Producer, Consumer};
 /// use std::sync::Arc;
 ///
 /// let (mut producer, mut consumer) = new_bounded::<_, 256>();
@@ -611,7 +636,8 @@ generate_spsc_producer_and_consumer!(
 /// # Examples
 ///
 /// ```
-/// use parcoll::spsc::{new_bounded, Producer, Consumer};
+/// use parcoll::spsc::new_bounded;
+/// use parcoll::{Producer, Consumer};
 /// use std::sync::Arc;
 ///
 /// let (mut producer, mut consumer) = new_bounded::<_, 256>();
@@ -648,23 +674,24 @@ pub fn new_cache_padded_bounded<T, const CAPACITY: usize>() -> (
 mod tests {
     use super::*;
     use std::collections::VecDeque;
+    use crate::{Consumer, Producer};
 
     const CAPACITY: usize = 256;
 
     #[test]
     fn test_spsc_bounded_size() {
-        let queue = SPSCBoundedQueue::<(), CAPACITY>::new();
+        let queue = SPSCBoundedQueue::<u8, CAPACITY>::new();
 
         assert_eq!(
             size_of_val(&queue),
-            size_of::<usize>() + size_of::<LongAtomic>() * 2
+            CAPACITY + size_of::<LongAtomic>() * 2
         );
 
-        let cache_padded_queue = SPSCBoundedQueue::<(), CAPACITY, CachePaddedLongAtomic>::new();
+        let cache_padded_queue = SPSCBoundedQueue::<u8, CAPACITY, CachePaddedLongAtomic>::new();
 
         assert_eq!(
             size_of_val(&cache_padded_queue),
-            size_of::<CachePaddedLongAtomic>() * 2 + size_of::<usize>()
+            size_of::<CachePaddedLongAtomic>() * 2 + CAPACITY
         );
     }
 
