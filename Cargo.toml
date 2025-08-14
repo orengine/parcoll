@@ -22,9 +22,11 @@ st3 = "0.4.1"
 loom = "0.7.2"
 
 [features]
-default = []
+default = ["unbounded_slices_always_pow2"]
+unbounded_slices_always_pow2 = []
 always_steal = []
 disable_unbounded = []
+untested_memory_ordering = []
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(parcoll_loom)'] }

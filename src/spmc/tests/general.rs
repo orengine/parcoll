@@ -1,8 +1,8 @@
 use crate::backoff::Backoff;
 use crate::spmc::{
     new_bounded, new_cache_padded_bounded, new_cache_padded_unbounded, new_unbounded,
-    Consumer as ConsumerExt, Producer as ProducerExt,
 };
+use crate::{Consumer as ConsumerExt, Producer as ProducerExt};
 use crate::test_lock::TEST_LOCK;
 use std::mem::MaybeUninit;
 use std::sync::atomic::{AtomicUsize, Ordering};

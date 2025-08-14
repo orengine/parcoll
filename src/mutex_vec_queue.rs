@@ -1,9 +1,9 @@
 use crate::hints::{assert_hint, unlikely};
 use crate::loom_bindings::sync::{Arc, Mutex};
-use crate::spmc::Producer;
-use crate::sync_batch_receiver::SyncBatchReceiver;
+use crate::batch_receiver::{BatchReceiver, LockFreeBatchReceiver};
 use std::ptr::slice_from_raw_parts;
 use std::{mem, ptr};
+use crate::Producer;
 
 pub(crate) struct VecQueue<T> {
     ptr: *mut T,
@@ -238,18 +238,8 @@ impl<T> MutexVecQueue<T> {
     pub fn move_batch_to_producer(&self, producer: &mut impl Producer<T>, limit: usize) {
         self.inner.lock().move_batch_to_producer(producer, limit);
     }
-}
-
-impl<T> Default for MutexVecQueue<T> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl<T> SyncBatchReceiver<T> for MutexVecQueue<T> {
-    fn push_many_and_one(&self, first: &[T], last: &[T], value: T) {
-        let mut inner = self.inner.lock();
-
+    
+    fn push_many_and_one_with_inner(inner: &mut VecQueue<T>, first: &[T], last: &[T], value: T) {
         while inner.len() + first.len() + last.len() + 1 > inner.capacity {
             let new_capacity = inner.capacity * 2;
 
@@ -265,14 +255,9 @@ impl<T> SyncBatchReceiver<T> for MutexVecQueue<T> {
         inner.extend_from_slice(last);
 
         inner.push(unsafe { ptr::read(&value) });
-
-        // Clippy wants it
-        drop(inner);
     }
-
-    fn push_many_and_slice(&self, first: &[T], last: &[T], slice: &[T]) {
-        let mut inner = self.inner.lock();
-
+    
+    fn push_many_and_slice_with_inner(inner: &mut VecQueue<T>, first: &[T], last: &[T], slice: &[T]) {
         while inner.len() + first.len() + last.len() + slice.len() > inner.capacity {
             let new_capacity = inner.capacity * 2;
 
@@ -290,8 +275,49 @@ impl<T> SyncBatchReceiver<T> for MutexVecQueue<T> {
     }
 }
 
+impl<T> Default for MutexVecQueue<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<T> BatchReceiver<T> for MutexVecQueue<T> {
+    fn push_many_and_slice(&self, first: &[T], last: &[T], slice: &[T]) {
+        MutexVecQueue::push_many_and_slice_with_inner(&mut self.inner.lock(), first, last, slice);
+    }
+
+    fn push_many_and_one(&self, first: &[T], last: &[T], value: T) {
+        MutexVecQueue::push_many_and_one_with_inner(&mut self.inner.lock(), first, last, value);
+    }
+}
+
+impl<T> LockFreeBatchReceiver<T> for MutexVecQueue<T> {
+    unsafe fn lock_free_push_many_and_slice(&self, first: &[T], last: &[T], slice: &[T]) -> Result<(), ()> {
+        match self.inner.try_lock() {
+            Ok(mut inner) => {
+                MutexVecQueue::push_many_and_slice_with_inner(&mut inner, first, last, slice);
+                
+                Ok(())
+            }
+            Err(_) => Err(()),
+        }
+    }
+
+    unsafe fn push_many_and_one(&self, first: &[T], last: &[T], value: T) -> Result<(), T> {
+        match self.inner.try_lock() {
+            Ok(mut inner) => {
+                MutexVecQueue::push_many_and_one_with_inner(&mut inner, first, last, value);
+                
+                Ok(())
+            }
+            Err(value) => Err(value),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use crate::spmc_producer::SPMCProducer;
     use super::*;
 
     const N: usize = 100_000;

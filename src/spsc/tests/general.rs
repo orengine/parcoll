@@ -1,6 +1,7 @@
 use crate::backoff::Backoff;
 use crate::loom_bindings::thread::yield_now;
-use crate::spsc::{new_bounded, new_cache_padded_bounded, new_cache_padded_unbounded, new_unbounded, Consumer as ConsumerExt, Producer as ProducerExt};
+use crate::spsc::{new_bounded, new_cache_padded_bounded, new_cache_padded_unbounded, new_unbounded};
+use crate::{Consumer as ConsumerExt, Producer as ProducerExt};
 use crate::test_lock::TEST_LOCK;
 use std::mem::MaybeUninit;
 use std::sync::atomic::{AtomicUsize, Ordering};

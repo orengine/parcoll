@@ -113,18 +113,27 @@ impl<T, AtomicWrapper: Deref<Target = AtomicI32> + Default> NaiveRWLock<T, Atomi
             }
         }
     }
+   
+    /// Tries to acquire a write lock. Returns `None` if a read or write lock is held.
+    pub fn try_write(&self) -> Option<NaiveRWLockWriteGuard<T, AtomicWrapper>> {
+        match self
+            .state
+            .compare_exchange(0, -1, Ordering::Acquire, Ordering::Relaxed)
+        {
+            Ok(_) => Some(NaiveRWLockWriteGuard { rw_lock: self }),
+            Err(_) => None,
+        }
+    }
 
     /// Acquires a write lock. Blocks until the lock is available.
     pub fn write(&self) -> NaiveRWLockWriteGuard<T, AtomicWrapper> {
         let backoff = Backoff::new();
 
         loop {
-            match self
-                .state
-                .compare_exchange(0, -1, Ordering::Acquire, Ordering::Relaxed)
-            {
-                Ok(_) => return NaiveRWLockWriteGuard { rw_lock: self },
-                Err(_) => backoff.snooze(),
+            if let Some(guard) = self.try_write() {
+                return guard;
+            } else {
+                backoff.snooze();
             }
         }
     }
