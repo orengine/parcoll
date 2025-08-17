@@ -9,8 +9,8 @@ pub enum LockFreePopErr {
 impl std::fmt::Debug for LockFreePopErr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            LockFreePopErr::Empty => write!(f, "empty"),
-            LockFreePopErr::ShouldWait => write!(f, "should wait"),
+            Self::Empty => write!(f, "empty"),
+            Self::ShouldWait => write!(f, "should wait"),
         }
     }
 }
@@ -26,8 +26,8 @@ pub enum LockFreePushErr<T> {
 impl<T> std::fmt::Debug for LockFreePushErr<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            LockFreePushErr::Full(_) => write!(f, "full"),
-            LockFreePushErr::ShouldWait(_) => write!(f, "should wait"),
+            Self::Full(_) => write!(f, "full"),
+            Self::ShouldWait(_) => write!(f, "should wait"),
         }
     }
 }
@@ -43,8 +43,8 @@ pub enum LockFreePushManyErr {
 impl std::fmt::Debug for LockFreePushManyErr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            LockFreePushManyErr::NotEnoughSpace => write!(f, "not enough space"),
-            LockFreePushManyErr::ShouldWait => write!(f, "should wait"),
+            Self::NotEnoughSpace => write!(f, "not enough space"),
+            Self::ShouldWait => write!(f, "should wait"),
         }
     }
 }

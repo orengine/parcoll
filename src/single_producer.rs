@@ -1,5 +1,3 @@
-use std::mem;
-use crate::BatchReceiver;
 use crate::producer::{LockFreeProducer, Producer};
 
 /// A producer of a single-producer queue.
@@ -13,7 +11,7 @@ pub trait SingleProducer<T>: Producer<T> {
     /// It first copies the `right` slice, next the `left` slice.
     ///
     /// This method is low level
-    /// and is used for [`Consumer::steal_into`](spsc::Consumer::steal_into).
+    /// and is used for [`Consumer::steal_into`](crate::Consumer::steal_into).
     ///
     /// # Why it first copies the values and then commits them?
     ///
@@ -32,7 +30,12 @@ pub trait SingleProducer<T>: Producer<T> {
     /// # Panics
     ///
     /// If the [`SingleProducer`] doesn't have enough space to copy the values.
-    unsafe fn copy_and_commit_if<F, FSuccess, FError>(&self, right: &[T], left: &[T], f: F) -> Result<FSuccess, FError>
+    unsafe fn copy_and_commit_if<F, FSuccess, FError>(
+        &self,
+        right: &[T],
+        left: &[T],
+        f: F,
+    ) -> Result<FSuccess, FError>
     where
         F: FnOnce() -> Result<FSuccess, FError>;
 }

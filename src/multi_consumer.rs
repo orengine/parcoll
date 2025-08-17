@@ -2,8 +2,8 @@
 //! the [`MultiLockFreeConsumerSpawner`] and the [`MultiLockFreeConsumer`] traits for
 //! multi-consumer queues.
 
-use crate::Consumer;
 use crate::consumer::LockFreeConsumer;
+use crate::Consumer;
 
 /// A consumer of a multi-consumer queue.
 ///

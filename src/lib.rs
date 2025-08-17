@@ -5,6 +5,7 @@
 #![warn(clippy::pedantic)]
 #![warn(clippy::nursery)]
 #![warn(clippy::cargo)]
+#![allow(clippy::multiple_crate_versions, reason = "They were set by dev-dependencies")]
 #![allow(async_fn_in_trait, reason = "It improves readability.")]
 #![allow(
     clippy::missing_const_for_fn,
@@ -41,36 +42,36 @@
     reason = "The function's doc should explain what it returns."
 )]
 pub mod backoff;
+pub(crate) mod batch_receiver;
+pub mod buffer_version;
 pub mod cache_padded;
+mod consumer;
 pub mod hints;
 mod light_arc;
+mod lock_free_errors;
 #[cfg(all(parcoll_loom, test))]
 mod loom;
 pub(crate) mod loom_bindings;
+pub mod mpmc;
+pub mod multi_consumer;
+pub mod multi_producer;
 pub(crate) mod mutex_vec_queue;
-pub(crate) mod naive_rw_lock;
+pub mod naive_rw_lock;
 pub mod number_types;
+mod producer;
+pub mod single_consumer;
+pub mod single_producer;
 pub mod spmc;
+pub mod spmc_producer;
 pub mod spsc;
-pub(crate) mod batch_receiver;
+pub(crate) mod suspicious_orders;
+pub mod sync_cell;
 #[cfg(not(parcoll_loom))]
 mod test_lock;
-pub mod mpmc;
-mod lock_free_errors;
-pub mod single_consumer;
-pub mod multi_consumer;
-pub mod single_producer;
-mod consumer;
-mod producer;
-pub mod spmc_producer;
-pub mod multi_producer;
-pub mod sync_cell;
-pub mod buffer_version;
-pub(crate) mod suspicious_orders;
 
-pub use light_arc::LightArc;
-pub use mutex_vec_queue::MutexVecQueue;
 pub use batch_receiver::BatchReceiver;
-pub use lock_free_errors::*;
-pub use producer::{Producer, LockFreeProducer};
 pub use consumer::{Consumer, LockFreeConsumer};
+pub use light_arc::LightArc;
+pub use lock_free_errors::*;
+pub use mutex_vec_queue::MutexVecQueue;
+pub use producer::{LockFreeProducer, Producer};

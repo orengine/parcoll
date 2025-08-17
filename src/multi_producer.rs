@@ -1,7 +1,7 @@
 //! This module provides the [`MultiProducer`] and the [`MultiLockFreeProducer`] traits.
 
-use crate::Producer;
 use crate::producer::LockFreeProducer;
+use crate::Producer;
 
 /// A producer of a multi-producer queue.
 ///

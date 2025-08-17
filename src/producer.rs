@@ -1,6 +1,6 @@
 //! Provides the [`Producer`] and the [`LockFreeProducer`] traits.
-use std::mem;
 use crate::{LockFreePushErr, LockFreePushManyErr};
+use std::mem;
 
 /// A producer of a queue.
 pub trait Producer<T> {
@@ -46,7 +46,7 @@ pub trait Producer<T> {
     /// It returns an error if the queue is full.
     ///
     /// It may be non-lock-free.
-    fn maybe_push(&self, value: T) -> Result<(), T> {
+    fn maybe_push(&self, mut value: T) -> Result<(), T> {
         if unsafe { self.maybe_push_many(&*(&raw mut value).cast::<[_; 1]>()) }.is_ok() {
             mem::forget(value);
 
@@ -76,8 +76,8 @@ pub trait LockFreeProducer<T> {
     /// It is lock-free.
     /// If you can lock, you can look at the [`Producer::maybe_push`] method
     /// because if it is implemented not as lock-free, it should have better performance.
-    fn lock_free_maybe_push(&self, value: T) -> Result<(), LockFreePushErr<T>> {
-        match unsafe { self.maybe_push_many(&*(&raw mut value).cast::<[_; 1]>()) } {
+    fn lock_free_maybe_push(&self, mut value: T) -> Result<(), LockFreePushErr<T>> {
+        match unsafe { self.lock_free_maybe_push_many(&*(&raw mut value).cast::<[_; 1]>()) } {
             Ok(()) => Ok(()),
             Err(LockFreePushManyErr::NotEnoughSpace) => Err(LockFreePushErr::Full(value)),
             Err(LockFreePushManyErr::ShouldWait) => Err(LockFreePushErr::ShouldWait(value)),

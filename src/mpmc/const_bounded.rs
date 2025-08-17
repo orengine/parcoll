@@ -1,11 +1,11 @@
+use crate::backoff::Backoff;
+use crate::number_types::{LongAtomic, LongNumber, NotCachePaddedLongAtomic};
+use crate::LockFreePopErr;
 use std::cell::UnsafeCell;
 use std::mem::MaybeUninit;
 use std::ops::Deref;
 use std::sync::atomic::Ordering;
 use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
-use crate::backoff::Backoff;
-use crate::LockFreePopErr;
-use crate::number_types::{LongAtomic, LongNumber, NotCachePaddedLongAtomic};
 
 // Implementation notes for an MPMC (multi-producer, multi-consumer) bounded queue.
 //
@@ -121,7 +121,11 @@ impl State {
     }
 
     #[inline(always)]
-    fn is_queue_full(current_tail: LongNumber, state_value: LongNumber, capacity: LongNumber) -> bool {
+    fn is_queue_full(
+        current_tail: LongNumber,
+        state_value: LongNumber,
+        capacity: LongNumber,
+    ) -> bool {
         current_tail.wrapping_sub(capacity + 1) == state_value
     }
 }
@@ -181,11 +185,14 @@ where
 {
     /// Creates a new [`MPMCBoundedQueue`].
     pub fn new() -> Self {
-        debug_assert!(CAPACITY >= 2, "MPMCBoundedQueue should have at least 2 slots");
+        debug_assert!(
+            CAPACITY >= 2,
+            "MPMCBoundedQueue should have at least 2 slots"
+        );
         debug_assert!(size_of::<MaybeUninit<T>>() == size_of::<T>()); // Assume that we can just cast it
 
         let mut buffer: MaybeUninit<[Slot<T>; CAPACITY]> = MaybeUninit::uninit();
-        let buffer_ptr = unsafe { buffer.assume_init_ref() }.as_mut_ptr();
+        let buffer_ptr = unsafe { buffer.assume_init_mut() }.as_mut_ptr();
 
         for i in 0..CAPACITY {
             unsafe {
@@ -208,16 +215,13 @@ where
         let mut slot: &Slot<T>; // TODO annotation
 
         loop {
-            slot = &self.slots[tail % (CAPACITY as LongNumber)];
+            slot = &self.slots[tail as usize % CAPACITY];
             let state = slot.state().load(Acquire);
 
             if State::is_slot_free(tail, state) {
-                let cas_result = self.tail.compare_exchange_weak(
-                    tail,
-                    tail.wrapping_add(1),
-                    Relaxed,
-                    Relaxed,
-                );
+                let cas_result =
+                    self.tail
+                        .compare_exchange_weak(tail, tail.wrapping_add(1), Relaxed, Relaxed);
 
                 match cas_result {
                     Ok(_) => {
@@ -226,7 +230,7 @@ where
                         slot.state().mark_as_occupied(tail, Release);
 
                         break Ok(());
-                    },
+                    }
                     Err(current_tail) => {
                         tail = current_tail;
                     }
@@ -255,30 +259,29 @@ macro_rules! generate_pop_body {
         $on_empty:block
     ) => {{
         let mut head = $self.head.load(Relaxed);
-        let mut slot: &Slot<T>; // TODO annotation
+        let mut slot: &Slot<T>;
         #[allow(unused, reason = "It improve readability")]
         let $backoff_ident = $backoff_init;
 
         loop {
-            slot = &$self.slots[head % (CAPACITY as LongNumber)];
+            slot = &$self.slots[head as usize % CAPACITY];
             let state = slot.state().load(Acquire);
 
             if State::is_slot_occupied(head, state) {
-                let cas_result = $self.head.compare_exchange_weak(
-                    head,
-                    head.wrapping_add(1),
-                    Relaxed,
-                    Relaxed,
-                );
+                let cas_result =
+                    $self
+                        .head
+                        .compare_exchange_weak(head, head.wrapping_add(1), Relaxed, Relaxed);
 
                 match cas_result {
                     Ok(_) => {
                         let $success_value_ident = unsafe { slot.read_value() };
 
-                        slot.state().mark_as_free(head, CAPACITY as LongNumber, Release);
+                        slot.state()
+                            .mark_as_free(head, CAPACITY as LongNumber, Release);
 
                         $on_success_value
-                    },
+                    }
                     Err(current_head) => {
                         head = current_head;
                     }
@@ -289,7 +292,7 @@ macro_rules! generate_pop_body {
                 let old_head = head;
                 // We lose the race or the value is still not written. Try to pop again.
                 head = $self.head.load(Relaxed);
-                
+
                 if head == old_head {
                     $on_writer_block // Maybe the writer has been preempted.
                 }
@@ -313,15 +316,21 @@ where
     /// This method is not lock-free.
     /// If you want to use a lock-free version, use [`lock_free_pop`](MPMCBoundedQueue::lock_free_pop).
     pub(crate) fn pop(&self) -> Option<T> {
-        generate_pop_body!(self, backoff, Backoff::new(), {
-            backoff.snooze()
-        }, value, {
-            return Some(value);
-        }, {
-            return None;
-        })
+        generate_pop_body!(
+            self,
+            backoff,
+            Backoff::new(),
+            { backoff.snooze() },
+            value,
+            {
+                return Some(value);
+            },
+            {
+                return None;
+            }
+        )
     }
-    
+
     /// Pops values from the queue into the given buffer.
     /// Returns the number of popped values.
     ///
@@ -331,20 +340,20 @@ where
     /// If you want to use a lock-free version, use [`lock_free_pop_many`](MPMCBoundedQueue::lock_free_pop_many).
     pub(crate) fn pop_many(&self, dst: &mut [MaybeUninit<T>]) -> usize {
         let mut popped = 0;
-        
+
         while popped < dst.len() {
             if let Some(value) = self.pop() {
                 dst[popped].write(value);
-                
+
                 popped += 1;
             } else {
                 break;
             }
         }
-        
+
         popped
     }
-    
+
     /// Tries to pop a value from the queue.
     /// On failure, returns `Err(`[`LockFreePopErr`]`)`.
     ///
@@ -353,13 +362,21 @@ where
     /// This method is lock-free.
     /// If you want to use sync non-lock-free version, use [`pop`](MPMCBoundedQueue::pop).
     pub(crate) fn lock_free_pop(&self) -> Result<T, LockFreePopErr> {
-        generate_pop_body!(self, _backoff, (), {
-            return Err(LockFreePopErr::ShouldWait);
-        }, value, {
-            return Ok(value);
-        }, {
-            return Err(LockFreePopErr::Empty);
-        })
+        generate_pop_body!(
+            self,
+            _backoff,
+            (),
+            {
+                return Err(LockFreePopErr::ShouldWait);
+            },
+            value,
+            {
+                return Ok(value);
+            },
+            {
+                return Err(LockFreePopErr::Empty);
+            }
+        )
     }
 
     /// Tries to pop a value from the queue.
@@ -378,16 +395,16 @@ where
                     dst[popped].write(value);
 
                     popped += 1;
-                },
+                }
                 Err(LockFreePopErr::Empty) => {
                     return (popped, false);
-                },
+                }
                 Err(LockFreePopErr::ShouldWait) => {
                     return (popped, true);
                 }
             }
         }
-        
+
         (popped, false)
     }
 }

@@ -2,10 +2,10 @@ use crate::generic_spmc_queue::{
     CrossbeamFifoWorker, CrossbeamLifoWorker, GenericStealer, GenericWorker,
 };
 use criterion::{criterion_group, criterion_main, Criterion};
+use parcoll::spsc::Consumer;
 use parcoll::{spsc, LightArc};
 use std::sync::atomic::AtomicU64;
 use std::time::Instant;
-use parcoll::spsc::Consumer;
 
 pub(crate) mod generic_spmc_queue;
 
@@ -38,7 +38,7 @@ pub fn push_pop_spsc<P, C, Creator, const N: usize>(name: &str, creator: Creator
 where
     P: spsc::Producer<usize>,
     C: Consumer<usize>,
-    Creator: Fn() -> (P, C)
+    Creator: Fn() -> (P, C),
 {
     let (producer, consumer) = creator();
 
@@ -80,24 +80,15 @@ pub fn push_pop_small_crossbeam_lifo(c: &mut Criterion) {
 }
 
 pub fn push_pop_small_crossbeam_array_queue(c: &mut Criterion) {
-    push_pop::<LightArc<crossbeam_queue::ArrayQueue<_>>, 8>(
-        "small-crossbeam_array_queue",
-        c,
-    );
+    push_pop::<LightArc<crossbeam_queue::ArrayQueue<_>>, 8>("small-crossbeam_array_queue", c);
 }
 
 pub fn push_pop_small_crossbeam_seg_queue(c: &mut Criterion) {
-    push_pop::<LightArc<crossbeam_queue::SegQueue<_>>, 8>(
-        "small-crossbeam_seg_queue",
-        c,
-    );
+    push_pop::<LightArc<crossbeam_queue::SegQueue<_>>, 8>("small-crossbeam_seg_queue", c);
 }
 
 pub fn push_pop_small_parcoll_spmc_bounded(c: &mut Criterion) {
-    push_pop::<parcoll::spmc::CachePaddedSPMCProducer<_, 256>, 8>(
-        "small-parcoll_spmc_bounded",
-        c,
-    );
+    push_pop::<parcoll::spmc::CachePaddedSPMCProducer<_, 256>, 8>("small-parcoll_spmc_bounded", c);
 }
 
 pub fn push_pop_small_parcoll_spmc_unbounded(c: &mut Criterion) {
@@ -144,17 +135,11 @@ pub fn push_pop_large_crossbeam_lifo(c: &mut Criterion) {
 }
 
 pub fn push_pop_large_crossbeam_array_queue(c: &mut Criterion) {
-    push_pop::<LightArc<crossbeam_queue::ArrayQueue<_>>, 256>(
-        "large-crossbeam_array_queue",
-        c,
-    );
+    push_pop::<LightArc<crossbeam_queue::ArrayQueue<_>>, 256>("large-crossbeam_array_queue", c);
 }
 
 pub fn push_pop_large_crossbeam_seg_queue(c: &mut Criterion) {
-    push_pop::<LightArc<crossbeam_queue::SegQueue<_>>, 256>(
-        "large-crossbeam_seg_queue",
-        c,
-    );
+    push_pop::<LightArc<crossbeam_queue::SegQueue<_>>, 256>("large-crossbeam_seg_queue", c);
 }
 
 pub fn push_pop_large_parcoll_spmc_bounded(c: &mut Criterion) {

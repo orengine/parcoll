@@ -1,9 +1,11 @@
 use crate::backoff::Backoff;
+use crate::multi_consumer::MultiConsumer;
 use crate::spmc::{
     new_bounded, new_cache_padded_bounded, new_cache_padded_unbounded, new_unbounded,
 };
-use crate::{Consumer as ConsumerExt, Producer as ProducerExt};
+use crate::spmc_producer::SPMCProducer;
 use crate::test_lock::TEST_LOCK;
+use crate::{Consumer as ConsumerExt, Producer as ProducerExt};
 use std::mem::MaybeUninit;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -38,8 +40,8 @@ static RAND: AtomicUsize = AtomicUsize::new(4);
 
 fn test_spmc_multi_threaded_steal<Producer, Consumer>(creator: fn() -> (Producer, Consumer))
 where
-    Producer: ProducerExt<TestValue<usize>> + Send + 'static,
-    Consumer: ConsumerExt<TestValue<usize>> + Send + 'static,
+    Producer: ProducerExt<TestValue<usize>> + Send + 'static + SPMCProducer<TestValue<usize>>,
+    Consumer: ConsumerExt<TestValue<usize>> + MultiConsumer<TestValue<usize>> + Send + 'static,
 {
     const N: usize = if cfg!(miri) { 200 } else { 1_000_000 };
     const CHECK_TO: usize = if cfg!(feature = "always_steal") {
@@ -156,7 +158,7 @@ where
 fn test_spmc_multi_threaded_pop_many<Producer, Consumer>(creator: fn() -> (Producer, Consumer))
 where
     Producer: ProducerExt<TestValue<usize>> + Send + 'static,
-    Consumer: ConsumerExt<TestValue<usize>> + Send + 'static,
+    Consumer: ConsumerExt<TestValue<usize>> + MultiConsumer<TestValue<usize>> + Send + 'static,
 {
     const N: usize = if cfg!(miri) { 200 } else { 1_000_000 };
     const BATCH_SIZE: usize = 5;

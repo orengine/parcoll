@@ -1,22 +1,23 @@
-use parcoll::loom_bindings::thread;
+use parcoll::multi_consumer::MultiConsumer;
 use parcoll::spmc::{
     new_bounded, new_cache_padded_bounded, new_cache_padded_unbounded, new_unbounded,
 };
-use parcoll::spmc::{Consumer as ConsumerExt, Producer as ProducerExt};
+use parcoll::spmc_producer::SPMCProducer;
+use parcoll::Consumer;
 
-fn loom_basic_steal<Producer, Consumer, C>(creator: C)
+fn loom_basic_steal<P, C, Cr>(creator: Cr)
 where
-    Producer: ProducerExt<usize> + 'static,
-    Consumer: ConsumerExt<usize, AssociatedProducer = Producer> + 'static,
-    C: 'static + Sync + Send + Clone + Copy + Fn() -> (Producer, Consumer),
+    P: SPMCProducer<usize> + 'static,
+    C: Consumer<usize> + 'static,
+    Cr: 'static + Sync + Send + Clone + Copy + Fn() -> (P, C),
 {
     const LOOP_COUNT: usize = 20;
     const ITEM_COUNT_PER_LOOP: usize = 10_000;
 
     loom::model(move || {
-        let (mut producer, mut consumer) = creator();
+        let (producer, consumer) = creator();
 
-        let th = thread::spawn(move || {
+        let th = loom::thread::spawn(move || {
             let (mut dest_producer, _) = creator();
             let mut n = 0;
 
@@ -60,15 +61,15 @@ where
     });
 }
 
-fn loom_multi_stealer<Producer, Consumer, C>(creator: C)
+fn loom_multi_stealer<P, C, Cr>(creator: Cr)
 where
-    Producer: ProducerExt<usize> + 'static,
-    Consumer: ConsumerExt<usize, AssociatedProducer = Producer> + 'static,
-    C: 'static + Sync + Send + Clone + Copy + Fn() -> (Producer, Consumer),
+    P: SPMCProducer<usize> + 'static,
+    C: MultiConsumer<usize> + 'static,
+    Cr: 'static + Sync + Send + Clone + Copy + Fn() -> (P, C),
 {
     const ITEM_COUNT: usize = 15_000;
 
-    let steal_half = move |mut consumer: Consumer| -> usize {
+    let steal_half = move |consumer: C| -> usize {
         let (mut dest_worker, _) = creator();
 
         let _ = consumer.steal_into(&mut dest_worker);
@@ -82,12 +83,12 @@ where
     };
 
     loom::model(move || {
-        let (mut producer, consumer) = creator();
+        let (producer, consumer) = creator();
         let consumer1 = consumer.clone();
         let consumer2 = consumer.clone();
 
-        let th1 = thread::spawn(move || steal_half(consumer1));
-        let th2 = thread::spawn(move || steal_half(consumer2));
+        let th1 = loom::thread::spawn(move || steal_half(consumer1));
+        let th2 = loom::thread::spawn(move || steal_half(consumer2));
 
         let mut n = 0;
         for _ in 0..ITEM_COUNT {
@@ -107,22 +108,22 @@ where
     });
 }
 
-fn loom_chained_steal<Producer, Consumer, C>(creator: C)
+fn loom_chained_steal<P, C, Cr>(creator: Cr)
 where
-    Producer: ProducerExt<usize> + 'static,
-    Consumer: ConsumerExt<usize, AssociatedProducer = Producer> + 'static,
-    C: 'static + Sync + Send + Clone + Copy + Fn() -> (Producer, Consumer),
+    P: SPMCProducer<usize> + 'static,
+    C: Consumer<usize> + 'static,
+    Cr: 'static + Sync + Send + Clone + Copy + Fn() -> (P, C),
 {
     loom::model(move || {
-        let (mut producer1, mut consumer1) = creator();
-        let (mut producer2, mut consumer2) = creator();
+        let (producer1, consumer1) = creator();
+        let (producer2, consumer2) = creator();
 
         for _ in 0..40 {
             producer1.maybe_push(42).unwrap();
             producer2.maybe_push(42).unwrap();
         }
 
-        let th = thread::spawn(move || {
+        let th = loom::thread::spawn(move || {
             let (mut dest_producer, _) = creator();
             let _ = consumer1.steal_into(&mut dest_producer);
 
@@ -131,7 +132,7 @@ where
 
         while producer1.pop().is_some() {}
 
-        let _ = consumer2.steal_into(&mut producer1);
+        let _ = consumer2.steal_into(&producer1);
 
         th.join().unwrap();
 
@@ -141,25 +142,25 @@ where
 }
 
 #[cfg(feature = "always_steal")]
-fn loom_push_and_steal<Producer, Consumer, C>(creator: C)
+fn loom_push_and_steal<P, C, Cr>(creator: Cr)
 where
-    Producer: ProducerExt<usize> + 'static,
-    Consumer: ConsumerExt<usize, AssociatedProducer = Producer> + 'static,
-    C: 'static + Sync + Send + Clone + Copy + Fn() -> (Producer, Consumer),
+    P: SPMCProducer<usize> + 'static,
+    C: MultiConsumer<usize> + 'static,
+    Cr: 'static + Sync + Send + Clone + Copy + Fn() -> (P, C),
 {
-    let steal_half = move |mut consumer: Consumer| -> usize {
+    let steal_half = move |consumer: C| -> usize {
         let (mut dest_producer, _) = creator();
 
         consumer.steal_into(&mut dest_producer)
     };
 
     loom::model(move || {
-        let (mut producer, consumer) = creator();
+        let (producer, consumer) = creator();
         let consumer1 = consumer.clone();
         let consumer2 = consumer.clone();
 
-        let th1 = thread::spawn(move || steal_half(consumer1));
-        let th2 = thread::spawn(move || steal_half(consumer2));
+        let th1 = loom::thread::spawn(move || steal_half(consumer1));
+        let th2 = loom::thread::spawn(move || steal_half(consumer2));
 
         producer.maybe_push(42).unwrap();
         producer.maybe_push(42).unwrap();

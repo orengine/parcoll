@@ -1,10 +1,12 @@
+//! This module provides the [`MutexVecQueue`].
+use crate::batch_receiver::{BatchReceiver, LockFreeBatchReceiver, LockFreePushBatchErr};
 use crate::hints::{assert_hint, unlikely};
-use crate::loom_bindings::sync::{Arc, Mutex};
-use crate::batch_receiver::{BatchReceiver, LockFreeBatchReceiver};
+use crate::loom_bindings::sync::Mutex;
+use crate::{LightArc, Producer};
 use std::ptr::slice_from_raw_parts;
 use std::{mem, ptr};
-use crate::Producer;
 
+/// A queue that uses a vector to store the elements.
 pub(crate) struct VecQueue<T> {
     ptr: *mut T,
     head: usize,
@@ -14,6 +16,8 @@ pub(crate) struct VecQueue<T> {
 }
 
 impl<T> VecQueue<T> {
+    /// Allocates a new vector with the given capacity.
+    #[cold]
     fn allocate(capacity: usize) -> *mut T {
         debug_assert!(capacity > 0 && capacity.is_power_of_two());
 
@@ -22,6 +26,8 @@ impl<T> VecQueue<T> {
         }
     }
 
+    /// Deallocates a vector with the given capacity.
+    #[cold]
     fn deallocate(ptr: *mut T, capacity: usize) {
         unsafe {
             std::alloc::dealloc(
@@ -31,12 +37,14 @@ impl<T> VecQueue<T> {
         }
     }
 
+    /// Returns the mask for the given capacity.
     fn get_mask_for_capacity(capacity: usize) -> usize {
         debug_assert!(capacity.is_power_of_two());
 
         capacity - 1
     }
 
+    /// Returns the physical index for the given index.
     #[inline(always)]
     fn get_physical_index(&self, index: usize) -> usize {
         debug_assert!(self.capacity.is_power_of_two());
@@ -44,6 +52,7 @@ impl<T> VecQueue<T> {
         index & self.mask
     }
 
+    /// Creates a new vector with the default capacity.
     pub(crate) fn new() -> Self {
         const DEFAULT_CAPACITY: usize = 16;
 
@@ -56,14 +65,17 @@ impl<T> VecQueue<T> {
         }
     }
 
+    /// Returns the number of elements in the queue.
     pub(crate) fn len(&self) -> usize {
         self.tail.wrapping_sub(self.head)
     }
 
+    /// Returns whether the queue is empty.
     pub(crate) fn is_empty(&self) -> bool {
         self.head == self.tail
     }
 
+    /// Extends the vector to the given capacity.
     #[inline(never)]
     #[cold]
     #[track_caller]
@@ -100,6 +112,7 @@ impl<T> VecQueue<T> {
         self.mask = Self::get_mask_for_capacity(capacity);
     }
 
+    /// Pushes a value to the queue.
     #[inline]
     pub(crate) fn push(&mut self, value: T) {
         if unlikely(self.len() == self.capacity) {
@@ -115,6 +128,7 @@ impl<T> VecQueue<T> {
         self.tail = self.tail.wrapping_add(1);
     }
 
+    /// Pops a value from the queue.
     #[inline]
     pub(crate) fn pop(&mut self) -> Option<T> {
         if self.is_empty() {
@@ -129,8 +143,13 @@ impl<T> VecQueue<T> {
         Some(value)
     }
 
+    /// Pushes a slice to the queue.
+    ///
+    /// # Safety
+    ///
+    /// It `T` is not `Copy`, the caller should [`forget`](mem::forget) the values.
     #[inline]
-    pub(crate) fn extend_from_slice(&mut self, slice: &[T]) {
+    pub(crate) unsafe fn extend_from_slice(&mut self, slice: &[T]) {
         let needed = self.len() + slice.len();
 
         if unlikely(needed > self.capacity) {
@@ -148,12 +167,12 @@ impl<T> VecQueue<T> {
         unsafe {
             if slice.len() <= right_space {
                 // fits in one memcpy
-                std::ptr::copy_nonoverlapping(slice.as_ptr(), self.ptr.add(phys_tail), slice.len());
+                ptr::copy_nonoverlapping(slice.as_ptr(), self.ptr.add(phys_tail), slice.len());
             } else {
                 // wraparound case
-                std::ptr::copy_nonoverlapping(slice.as_ptr(), self.ptr.add(phys_tail), right_space);
+                ptr::copy_nonoverlapping(slice.as_ptr(), self.ptr.add(phys_tail), right_space);
 
-                std::ptr::copy_nonoverlapping(
+                ptr::copy_nonoverlapping(
                     slice.as_ptr().add(right_space),
                     self.ptr,
                     slice.len() - right_space,
@@ -164,6 +183,7 @@ impl<T> VecQueue<T> {
         self.tail = self.tail.wrapping_add(slice.len());
     }
 
+    /// Moves at most `limit` elements from the queue to the producer.
     pub(crate) fn move_batch_to_producer(
         &mut self,
         producer: &mut impl Producer<T>,
@@ -211,34 +231,44 @@ impl<T> Drop for VecQueue<T> {
     }
 }
 
+/// A wrapper around `LightArc<Mutex<VecQueue<T>>>`.
+/// It can be used as a global queue.
+///
+/// It implements [`BatchReceiver`] and [`LockFreeBatchReceiver`] with returning an error when it should wait.
 #[derive(Clone)]
 pub struct MutexVecQueue<T> {
-    inner: Arc<Mutex<VecQueue<T>>>,
+    inner: LightArc<Mutex<VecQueue<T>>>,
 }
 
 impl<T> MutexVecQueue<T> {
+    /// Creates a new `MutexVecQueue`.
     pub fn new() -> Self {
         Self {
-            inner: Arc::new(Mutex::new(VecQueue::new())),
+            inner: LightArc::new(Mutex::new(VecQueue::new())),
         }
     }
 
+    /// Returns the number of elements in the queue.
     pub fn len(&self) -> usize {
         self.inner.lock().len()
     }
 
+    /// Returns whether the queue is empty.
     pub fn is_empty(&self) -> bool {
         self.inner.lock().is_empty()
     }
 
+    /// Pushes a value to the queue.
     pub fn push(&self, task: T) {
         self.inner.lock().push(task);
     }
 
+    /// Moves at most `limit` elements from the queue to the producer.
     pub fn move_batch_to_producer(&self, producer: &mut impl Producer<T>, limit: usize) {
         self.inner.lock().move_batch_to_producer(producer, limit);
     }
-    
+
+    /// Pushes two slices and a value to the queue.
     fn push_many_and_one_with_inner(inner: &mut VecQueue<T>, first: &[T], last: &[T], value: T) {
         while inner.len() + first.len() + last.len() + 1 > inner.capacity {
             let new_capacity = inner.capacity * 2;
@@ -251,13 +281,21 @@ impl<T> MutexVecQueue<T> {
             "capacity was not updated",
         );
 
-        inner.extend_from_slice(first);
-        inner.extend_from_slice(last);
+        unsafe {
+            inner.extend_from_slice(first);
+            inner.extend_from_slice(last);
+        }
 
-        inner.push(unsafe { ptr::read(&value) });
+        inner.push(value);
     }
-    
-    fn push_many_and_slice_with_inner(inner: &mut VecQueue<T>, first: &[T], last: &[T], slice: &[T]) {
+
+    /// Pushes three slices to the queue.
+    fn push_many_and_slice_with_inner(
+        inner: &mut VecQueue<T>,
+        first: &[T],
+        last: &[T],
+        slice: &[T],
+    ) {
         while inner.len() + first.len() + last.len() + slice.len() > inner.capacity {
             let new_capacity = inner.capacity * 2;
 
@@ -269,9 +307,11 @@ impl<T> MutexVecQueue<T> {
             "capacity was not updated",
         );
 
-        inner.extend_from_slice(first);
-        inner.extend_from_slice(last);
-        inner.extend_from_slice(slice);
+        unsafe {
+            inner.extend_from_slice(first);
+            inner.extend_from_slice(last);
+            inner.extend_from_slice(slice);
+        }
     }
 }
 
@@ -282,43 +322,69 @@ impl<T> Default for MutexVecQueue<T> {
 }
 
 impl<T> BatchReceiver<T> for MutexVecQueue<T> {
-    fn push_many_and_slice(&self, first: &[T], last: &[T], slice: &[T]) {
-        MutexVecQueue::push_many_and_slice_with_inner(&mut self.inner.lock(), first, last, slice);
+    unsafe fn push_many_and_slice(&self, first: &[T], last: &[T], slice: &[T]) {
+        Self::push_many_and_slice_with_inner(&mut self.inner.lock(), first, last, slice);
     }
 
-    fn push_many_and_one(&self, first: &[T], last: &[T], value: T) {
-        MutexVecQueue::push_many_and_one_with_inner(&mut self.inner.lock(), first, last, value);
+    unsafe fn push_many_and_one(&self, first: &[T], last: &[T], value: T) {
+        Self::push_many_and_one_with_inner(&mut self.inner.lock(), first, last, value);
     }
 }
 
 impl<T> LockFreeBatchReceiver<T> for MutexVecQueue<T> {
-    unsafe fn lock_free_push_many_and_slice(&self, first: &[T], last: &[T], slice: &[T]) -> Result<(), ()> {
-        match self.inner.try_lock() {
-            Ok(mut inner) => {
-                MutexVecQueue::push_many_and_slice_with_inner(&mut inner, first, last, slice);
-                
-                Ok(())
+    unsafe fn lock_free_push_many_and_slice_and_commit_if<F, FSuccess, FError>(
+        &self,
+        first: &[T],
+        last: &[T],
+        slice: &[T],
+        f: F,
+    ) -> Result<FSuccess, LockFreePushBatchErr<(), FError>>
+    where
+        F: FnOnce() -> Result<FSuccess, FError>,
+    {
+        let Some(mut inner) = self.inner.try_lock() else {
+            return Err(LockFreePushBatchErr::ShouldWait(()));
+        };
+
+        match f() {
+            Ok(res) => {
+                Self::push_many_and_slice_with_inner(&mut inner, first, last, slice);
+
+                Ok(res)
             }
-            Err(_) => Err(()),
+            Err(err) => Err(LockFreePushBatchErr::CondictionIsFalse(((), err))),
         }
     }
 
-    unsafe fn push_many_and_one(&self, first: &[T], last: &[T], value: T) -> Result<(), T> {
-        match self.inner.try_lock() {
-            Ok(mut inner) => {
-                MutexVecQueue::push_many_and_one_with_inner(&mut inner, first, last, value);
-                
-                Ok(())
+    unsafe fn push_many_and_one_and_commit_if<F, FSuccess, FError>(
+        &self,
+        first: &[T],
+        last: &[T],
+        value: T,
+        f: F,
+    ) -> Result<FSuccess, LockFreePushBatchErr<T, FError>>
+    where
+        F: FnOnce() -> Result<FSuccess, FError>,
+    {
+        let Some(mut inner) = self.inner.try_lock() else {
+            return Err(LockFreePushBatchErr::ShouldWait(value));
+        };
+
+        match f() {
+            Ok(res) => {
+                Self::push_many_and_one_with_inner(&mut inner, first, last, value);
+
+                Ok(res)
             }
-            Err(value) => Err(value),
+            Err(err) => Err(LockFreePushBatchErr::CondictionIsFalse((value, err))),
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::spmc_producer::SPMCProducer;
     use super::*;
+    use crate::spmc_producer::SPMCProducer;
 
     const N: usize = 100_000;
     const BATCH_SIZE: usize = 10;
@@ -343,7 +409,7 @@ mod tests {
                 .map(|j| i * BATCH_SIZE + j)
                 .collect::<Vec<_>>();
 
-            queue.extend_from_slice(&slice);
+            unsafe { queue.extend_from_slice(&slice) };
         }
 
         for i in 0..N {
@@ -364,7 +430,8 @@ mod tests {
                 .collect::<Vec<_>>();
             let one_more_value = i * BATCH_SIZE + BATCH_SIZE - 1;
 
-            let _ = global_queue.push_many_and_one(&slice[..2], &slice[2..], one_more_value);
+            let _ =
+                unsafe { global_queue.push_many_and_one(&slice[..2], &slice[2..], one_more_value) };
         }
 
         for i in 0..N / BATCH_SIZE {

@@ -1,8 +1,8 @@
 //! This module provides the [`Consumer`] and the [`LockFreeConsumer`] traits.
-use std::mem::MaybeUninit;
 use crate::hints::{unlikely, unreachable_hint, unwrap_or_bug_hint};
-use crate::LockFreePopErr;
 use crate::single_producer::{SingleLockFreeProducer, SingleProducer};
+use crate::LockFreePopErr;
+use std::mem::MaybeUninit;
 
 /// A consumer of a queue.
 pub trait Consumer<T> {
@@ -52,7 +52,10 @@ pub trait Consumer<T> {
     ///
     /// Panics if the other queue is not empty.
     fn steal_into(&self, dst: &impl SingleProducer<T>) -> usize {
-        debug_assert!(dst.is_empty(), "steal_into requires the other queue to be empty");
+        debug_assert!(
+            dst.is_empty(),
+            "steal_into requires the other queue to be empty"
+        );
 
         let max_stolen = self.len() / 2;
         if !cfg!(feature = "always_steal") && max_stolen < 4 || max_stolen == 0 {
@@ -96,7 +99,8 @@ pub trait LockFreeConsumer<T>: Consumer<T> {
     /// because if it is implemented not as lock-free, it should have better performance.
     fn lock_free_pop(&self) -> Result<T, LockFreePopErr> {
         let mut uninit_item = MaybeUninit::uninit();
-        let (n, should_wait) = self.lock_free_pop_many(unsafe { &mut *(&raw mut uninit_item).cast::<[_; 1]>() });
+        let (n, should_wait) =
+            self.lock_free_pop_many(unsafe { &mut *(&raw mut uninit_item).cast::<[_; 1]>() });
 
         if unlikely(should_wait) {
             return Err(LockFreePopErr::ShouldWait);
@@ -105,7 +109,10 @@ pub trait LockFreeConsumer<T>: Consumer<T> {
         if n == 1 {
             Ok(unsafe { uninit_item.assume_init() })
         } else {
-            debug_assert_eq!(n, 0, "lock_free_pop_many returned more than one value for [T; 1]");
+            debug_assert_eq!(
+                n, 0,
+                "lock_free_pop_many returned more than one value for [T; 1]"
+            );
 
             Err(LockFreePopErr::Empty)
         }
@@ -127,7 +134,10 @@ pub trait LockFreeConsumer<T>: Consumer<T> {
     ///
     /// Panics if the other queue is not empty.
     fn lock_free_steal_into(&self, dst: &impl SingleLockFreeProducer<T>) -> (usize, bool) {
-        debug_assert!(dst.is_empty(), "steal_into requires the other queue to be empty");
+        debug_assert!(
+            dst.is_empty(),
+            "steal_into requires the other queue to be empty"
+        );
 
         let max_stolen = self.len() / 2;
         if !cfg!(feature = "always_steal") && max_stolen < 4 || max_stolen == 0 {
@@ -145,7 +155,7 @@ pub trait LockFreeConsumer<T>: Consumer<T> {
                     unwrap_or_bug_hint(dst.lock_free_maybe_push(item));
 
                     stolen += 1;
-                },
+                }
                 Err(LockFreePopErr::Empty) => return (stolen, false),
                 Err(LockFreePopErr::ShouldWait) => return (stolen, true),
             }

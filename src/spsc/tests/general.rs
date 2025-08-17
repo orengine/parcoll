@@ -1,8 +1,11 @@
 use crate::backoff::Backoff;
 use crate::loom_bindings::thread::yield_now;
-use crate::spsc::{new_bounded, new_cache_padded_bounded, new_cache_padded_unbounded, new_unbounded};
-use crate::{Consumer as ConsumerExt, Producer as ProducerExt};
+use crate::single_producer::SingleProducer;
+use crate::spsc::{
+    new_bounded, new_cache_padded_bounded, new_cache_padded_unbounded, new_unbounded,
+};
 use crate::test_lock::TEST_LOCK;
+use crate::{Consumer as ConsumerExt, Producer as ProducerExt};
 use std::mem::MaybeUninit;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -37,7 +40,7 @@ static RAND: AtomicUsize = AtomicUsize::new(4);
 
 fn test_spsc_multi_threaded_steal<Producer, Consumer>(creator: fn() -> (Producer, Consumer))
 where
-    Producer: ProducerExt<TestValue<usize>> + Send + 'static,
+    Producer: ProducerExt<TestValue<usize>> + SingleProducer<TestValue<usize>> + Send + 'static,
     Consumer: ConsumerExt<TestValue<usize>> + Send + 'static,
 {
     const N: usize = if cfg!(miri) { 200 } else { 1_000_000 };

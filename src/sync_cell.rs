@@ -61,12 +61,12 @@ impl<T> SyncCell<T> for NaiveRWLock<T> {
     }
 
     fn try_with<U>(&self, f: impl FnOnce(&T) -> U) -> Option<U> {
-        self.try_read().map(f)
+        self.try_read().map(|guard| f(&*guard))
     }
 
     fn try_swap(&self, value: T) -> Result<T, T> {
         let Some(mut guard) = self.try_write() else {
-            Err(value)
+            return Err(value);
         };
 
         Ok(std::mem::replace(&mut *guard, value))
@@ -83,12 +83,12 @@ impl<T> SyncCell<T> for std::sync::RwLock<T> {
     }
 
     fn try_with<U>(&self, f: impl FnOnce(&T) -> U) -> Option<U> {
-        self.read().map(f).ok()
+        self.read().map(|guard| f(&*guard)).ok()
     }
 
     fn try_swap(&self, value: T) -> Result<T, T> {
         let Some(mut guard) = self.try_write().ok() else {
-            Err(value)
+            return Err(value);
         };
 
         Ok(std::mem::replace(&mut *guard, value))
@@ -105,14 +105,41 @@ impl<T> SyncCell<T> for std::sync::Mutex<T> {
     }
 
     fn try_with<U>(&self, f: impl FnOnce(&T) -> U) -> Option<U> {
-        self.lock().map(f).ok()
+        self.lock().map(|guard| f(&*guard)).ok()
     }
 
     fn try_swap(&self, value: T) -> Result<T, T> {
         let Some(mut guard) = self.lock().ok() else {
-            Err(value)
+            return Err(value);
         };
 
         Ok(std::mem::replace(&mut *guard, value))
     }
 }
+
+/// A mocking implementation of [`LockFreeSyncCell`]. But it is not lock-free.
+pub(crate) struct LockFreeSyncCellMock<T> {
+    inner: NaiveRWLock<T>,
+}
+
+impl<T> SyncCell<T> for LockFreeSyncCellMock<T> {
+    fn from_value(value: T) -> Self {
+        LockFreeSyncCellMock {
+            inner: NaiveRWLock::new(value),
+        }
+    }
+
+    fn get_mut(&mut self) -> &mut T {
+        self.inner.get_mut()
+    }
+
+    fn try_with<U>(&self, f: impl FnOnce(&T) -> U) -> Option<U> {
+        self.inner.try_with(f)
+    }
+
+    fn try_swap(&self, value: T) -> Result<T, T> {
+        self.inner.try_swap(value)
+    }
+}
+
+impl<T> LockFreeSyncCell<T> for LockFreeSyncCellMock<T> {}

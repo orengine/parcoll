@@ -10,14 +10,15 @@ use crate::light_arc::LightArc;
 use crate::number_types::{
     CachePaddedLongAtomic, LongAtomic, LongNumber, NotCachePaddedLongAtomic,
 };
+use crate::single_producer::SingleProducer;
+use crate::suspicious_orders::SUSPICIOUS_RELAXED_ACQUIRE;
+use crate::LockFreePushManyErr;
 use std::marker::PhantomData;
 use std::mem::{needs_drop, MaybeUninit};
 use std::ops::Deref;
-use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
+use std::sync::atomic::Ordering::{Acquire, Release};
 use std::{ptr, slice};
-use crate::{LockFreePopErr, LockFreePushErr, LockFreePushManyErr};
-use crate::spmc_producer::SPMCProducer;
-use crate::suspicious_orders::SUSPICIOUS_RELAXED_ACQUIRE;
+
 // TODO add caching head + tail
 
 // Don't care about ABA because we can count that 16-bit and 32-bit processors never
@@ -47,14 +48,11 @@ use crate::suspicious_orders::SUSPICIOUS_RELAXED_ACQUIRE;
 ///
 /// Functions [`new_bounded`] and [`new_cache_padded_bounded`] allocate the
 /// [`SPSCBoundedQueue`] on the heap in [`LightArc`] and provide separate producer and consumer.
-/// It hurts the performance if you don't need to allocate the queue separately but improves 
+/// It hurts the performance if you don't need to allocate the queue separately but improves
 /// the readability when you need to separate producer and consumer logic and share them.
-///
-/// It doesn't implement the [`Producer`] and [`Consumer`] traits because all producer and consumer
-/// methods are unsafe (can be called only by one thread for each).
 #[repr(C)]
 pub struct SPSCBoundedQueue<
-    T,
+    T: Send,
     const CAPACITY: usize,
     AtomicWrapper: Deref<Target = LongAtomic> + Default = NotCachePaddedLongAtomic,
 > {
@@ -63,7 +61,7 @@ pub struct SPSCBoundedQueue<
     buffer: [MaybeUninit<T>; CAPACITY],
 }
 
-impl<T, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> + Default>
+impl<T: Send, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> + Default>
     SPSCBoundedQueue<T, CAPACITY, AtomicWrapper>
 {
     /// Creates a new [`SPSCBoundedQueue`].
@@ -101,7 +99,7 @@ impl<T, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> + Defau
 }
 
 // Producer
-impl<T, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> + Default>
+impl<T: Send, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> + Default>
     SPSCBoundedQueue<T, CAPACITY, AtomicWrapper>
 {
     /// Pushes a slice into the queue. Returns a new tail (not index).
@@ -249,18 +247,12 @@ impl<T, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> + Defau
             unsafe { self.tail.unsync_load() }, // only the producer can change tail
             right,
         );
-        new_tail = Self::copy_slice(
-            self.buffer_mut_thin_ptr().cast(),
-            new_tail,
-            left,
-        );
+        new_tail = Self::copy_slice(self.buffer_mut_thin_ptr().cast(), new_tail, left);
 
         let should_commit = condition();
         match should_commit {
             Ok(res) => {
-                self
-                    .tail
-                    .store(new_tail, Release);
+                self.tail.store(new_tail, Release);
 
                 Ok(res)
             }
@@ -270,7 +262,7 @@ impl<T, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> + Defau
 }
 
 // Consumers
-impl<T, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> + Default>
+impl<T: Send, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> + Default>
     SPSCBoundedQueue<T, CAPACITY, AtomicWrapper>
 {
     /// Returns the number of values in the queue.
@@ -335,7 +327,7 @@ impl<T, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> + Defau
     /// # Panics
     ///
     /// If `dst` is not empty.
-    pub unsafe fn steal_into(&self, dst: &impl SPMCProducer<T>) -> usize {
+    pub unsafe fn steal_into(&self, dst: &impl SingleProducer<T>) -> usize {
         if cfg!(debug_assertions) {
             assert!(
                 dst.is_empty(),
@@ -346,7 +338,7 @@ impl<T, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> + Defau
         let src_head = unsafe { self.head.unsync_load() }; // only consumer can change head
         let src_tail = self.tail.load(Acquire);
         let n = Self::len(src_head, src_tail) / 2;
-        
+
         if !cfg!(feature = "always_steal") && n < 4 || n == 0 {
             // we don't steal less than 4 by default
             // because else we may lose more because of cache locality and NUMA awareness
@@ -372,12 +364,12 @@ impl<T, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> + Defau
                 )
             }
         };
-        
+
         unsafe {
             let _ = dst.copy_and_commit_if::<_, _, ()>(src_right, src_left, || {
                 self.head
                     .store(src_head.wrapping_add(n as LongNumber), Release);
-                
+
                 Ok(())
             });
         }
@@ -386,7 +378,7 @@ impl<T, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> + Defau
     }
 }
 
-impl<T, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> + Default> Default
+impl<T: Send, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> + Default> Default
     for SPSCBoundedQueue<T, CAPACITY, AtomicWrapper>
 {
     fn default() -> Self {
@@ -394,21 +386,22 @@ impl<T, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> + Defau
     }
 }
 
-unsafe impl<T, const CAPACITY: usize, AtomicWrapper> Sync
+unsafe impl<T: Send, const CAPACITY: usize, AtomicWrapper> Sync
     for SPSCBoundedQueue<T, CAPACITY, AtomicWrapper>
 where
     AtomicWrapper: Deref<Target = LongAtomic> + Default,
 {
 }
 #[allow(clippy::non_send_fields_in_send_ty, reason = "We guarantee it is Send")]
-unsafe impl<T, const CAPACITY: usize, AtomicWrapper> Send
+unsafe impl<T: Send, const CAPACITY: usize, AtomicWrapper> Send
     for SPSCBoundedQueue<T, CAPACITY, AtomicWrapper>
 where
     AtomicWrapper: Deref<Target = LongAtomic> + Default,
 {
 }
 
-impl<T, const CAPACITY: usize, AtomicWrapper> Drop for SPSCBoundedQueue<T, CAPACITY, AtomicWrapper>
+impl<T: Send, const CAPACITY: usize, AtomicWrapper> Drop
+    for SPSCBoundedQueue<T, CAPACITY, AtomicWrapper>
 where
     AtomicWrapper: Deref<Target = LongAtomic> + Default,
 {
@@ -439,11 +432,11 @@ where
 macro_rules! generate_spsc_producer_and_consumer {
     ($producer_name:ident, $consumer_name:ident, $atomic_wrapper:ty) => {
         /// The producer of the [`SPSCBoundedQueue`].
-        pub struct $producer_name<T, const CAPACITY: usize> {
+        pub struct $producer_name<T: Send, const CAPACITY: usize> {
             inner: LightArc<SPSCBoundedQueue<T, CAPACITY, $atomic_wrapper>>,
             _non_sync: PhantomData<*const ()>,
         }
-        
+
         impl<T: Send, const CAPACITY: usize> $crate::Producer<T> for $producer_name<T, CAPACITY> {
             #[inline]
             fn capacity(&self) -> usize {
@@ -471,27 +464,44 @@ macro_rules! generate_spsc_producer_and_consumer {
             }
         }
 
-        impl<T: Send, const CAPACITY: usize> $crate::single_producer::SingleProducer<T> for $producer_name<T, CAPACITY> {
-            unsafe fn copy_and_commit_if<F, FSuccess, FError>(&self, right: &[T], left: &[T], f: F) -> Result<FSuccess, FError>
+        impl<T: Send, const CAPACITY: usize> $crate::single_producer::SingleProducer<T>
+            for $producer_name<T, CAPACITY>
+        {
+            unsafe fn copy_and_commit_if<F, FSuccess, FError>(
+                &self,
+                right: &[T],
+                left: &[T],
+                f: F,
+            ) -> Result<FSuccess, FError>
             where
-                F: FnOnce() -> Result<FSuccess, FError>
+                F: FnOnce() -> Result<FSuccess, FError>,
             {
                 unsafe { self.inner.producer_copy_and_commit_if(right, left, f) }
             }
         }
-        
-        impl<T: Send, const CAPACITY: usize> $crate::LockFreeProducer<T> for $producer_name<T, CAPACITY> {
-            unsafe fn lock_free_maybe_push_many(&self, slice: &[T]) -> Result<(), LockFreePushManyErr> {
-                self.maybe_push_many(slice).map_err(|_| $crate::lock_free_errors::LockFreePushManyErr::NotEnoughSpace)
+
+        impl<T: Send, const CAPACITY: usize> $crate::LockFreeProducer<T>
+            for $producer_name<T, CAPACITY>
+        {
+            unsafe fn lock_free_maybe_push_many(
+                &self,
+                slice: &[T],
+            ) -> Result<(), LockFreePushManyErr> {
+                self.inner
+                    .producer_maybe_push_many(slice)
+                    .map_err(|_| $crate::lock_free_errors::LockFreePushManyErr::NotEnoughSpace)
             }
         }
-        
-        impl<T: Send, const CAPACITY: usize> $crate::single_producer::SingleLockFreeProducer<T> for $producer_name<T, CAPACITY> {}
+
+        impl<T: Send, const CAPACITY: usize> $crate::single_producer::SingleLockFreeProducer<T>
+            for $producer_name<T, CAPACITY>
+        {
+        }
 
         unsafe impl<T: Send, const CAPACITY: usize> Send for $producer_name<T, CAPACITY> {}
 
         /// The consumer of the [`SPSCBoundedQueue`].
-        pub struct $consumer_name<T, const CAPACITY: usize> {
+        pub struct $consumer_name<T: Send, const CAPACITY: usize> {
             inner: LightArc<SPSCBoundedQueue<T, CAPACITY, $atomic_wrapper>>,
             _non_sync: PhantomData<*const ()>,
         }
@@ -506,32 +516,43 @@ macro_rules! generate_spsc_producer_and_consumer {
             fn len(&self) -> usize {
                 unsafe { self.inner.consumer_len() }
             }
-            
+
             fn pop_many(&self, dst: &mut [MaybeUninit<T>]) -> usize {
                 unsafe { self.inner.consumer_pop_many(dst) }
             }
 
             #[inline(never)]
-            fn steal_into(&self, dst: &impl $crate::single_consumer::SingleProducer<T>) -> usize {
+            fn steal_into(&self, dst: &impl $crate::single_producer::SingleProducer<T>) -> usize {
                 unsafe { self.inner.steal_into(dst) }
             }
         }
-        
-        impl<T: Send, const CAPACITY: usize> $crate::LockFreeConsumer<T> for $consumer_name<T, CAPACITY> {
+
+        impl<T: Send, const CAPACITY: usize> $crate::LockFreeConsumer<T>
+            for $consumer_name<T, CAPACITY>
+        {
             #[inline]
             fn lock_free_pop_many(&self, dst: &mut [MaybeUninit<T>]) -> (usize, bool) {
-                (self.pop_many(dst), false)
+                unsafe { (self.inner.consumer_pop_many(dst), false) }
             }
-            
+
             #[inline(never)]
-            fn lock_free_steal(&self, dst: &impl Producer<T>) -> (usize, bool) {
-                (self.steal_into(dst), false)                
+            fn lock_free_steal_into(
+                &self,
+                dst: &impl $crate::single_producer::SingleLockFreeProducer<T>,
+            ) -> (usize, bool) {
+                unsafe { (self.inner.steal_into(dst), false) }
             }
         }
-        
-        impl<T: Send, const CAPACITY: usize> $crate::single_consumer::SingleConsumer<T> for $consumer_name<T, CAPACITY> {}
-        
-        impl<T: Send, const CAPACITY: usize> $crate::single_consumer::SingleLockFreeConsumer<T> for $consumer_name<T, CAPACITY> {}
+
+        impl<T: Send, const CAPACITY: usize> $crate::single_consumer::SingleConsumer<T>
+            for $consumer_name<T, CAPACITY>
+        {
+        }
+
+        impl<T: Send, const CAPACITY: usize> $crate::single_consumer::SingleLockFreeConsumer<T>
+            for $consumer_name<T, CAPACITY>
+        {
+        }
 
         unsafe impl<T: Send, const CAPACITY: usize> Send for $consumer_name<T, CAPACITY> {}
     };
@@ -558,11 +579,14 @@ generate_spsc_producer_and_consumer!(SPSCProducer, SPSCConsumer);
 ///
 /// # Bounded queue vs. [`unbounded queue`](crate::spsc::new_unbounded)
 ///
-/// - [`maybe_push`](Producer::maybe_push), [`maybe_push_many`](Producer::maybe_push_many)
+/// - [`maybe_push`](crate::Producer::maybe_push),
+///   [`maybe_push_many`](crate::Producer::maybe_push_many)
 ///   can return an error only for `bounded` queue.
-/// - [`Consumer::steal_into`] and [`Consumer::pop_many`] can pop zero values even if the source
+/// - [`Consumer::steal_into`](crate::Consumer::steal_into)
+///   and [`Consumer::pop_many`](crate::Consumer::pop_many) can pop zero values even if the source
 ///   queue is not empty for `unbounded` queue.
-/// - [`Consumer::capacity`] and [`Consumer::len`] can return old values for `unbounded` queue.
+/// - [`Consumer::capacity`](crate::Consumer::capacity)
+///   and [`Consumer::len`](crate::Consumer::len) can return old values for `unbounded` queue.
 /// - All methods of `bounded` queue work much faster than all methods of `unbounded` queue.
 ///
 /// # Cache padding
@@ -590,7 +614,7 @@ generate_spsc_producer_and_consumer!(SPSCProducer, SPSCConsumer);
 /// assert_eq!(unsafe { slice[0].assume_init() }, 1);
 /// assert_eq!(unsafe { slice[1].assume_init() }, 2);
 /// ```
-pub fn new_bounded<T, const CAPACITY: usize>(
+pub fn new_bounded<T: Send, const CAPACITY: usize>(
 ) -> (SPSCProducer<T, CAPACITY>, SPSCConsumer<T, CAPACITY>) {
     let queue = LightArc::new(SPSCBoundedQueue::new());
 
@@ -623,11 +647,14 @@ generate_spsc_producer_and_consumer!(
 ///
 /// # Bounded queue vs. [`unbounded queue`](crate::spsc::new_unbounded)
 ///
-/// - [`maybe_push`](Producer::maybe_push), [`maybe_push_many`](Producer::maybe_push_many)
+/// - [`maybe_push`](crate::Producer::maybe_push),
+///   [`maybe_push_many`](crate::Producer::maybe_push_many)
 ///   can return an error only for `bounded` queue.
-/// - [`Consumer::steal_into`] and [`Consumer::pop_many`] can pop zero values even if the source
+/// - [`Consumer::steal_into`](crate::Consumer::steal_into)
+///   and [`Consumer::pop_many`](crate::Consumer::pop_many) can pop zero values even if the source
 ///   queue is not empty for `unbounded` queue.
-/// - [`Consumer::capacity`] and [`Consumer::len`] can return old values for `unbounded` queue.
+/// - [`Consumer::capacity`](crate::Consumer::capacity)
+///   and [`Consumer::len`](crate::Consumer::len) can return old values for `unbounded` queue.
 /// - All methods of `bounded` queue work much faster than all methods of `unbounded` queue.
 ///
 /// # Cache padding
@@ -655,7 +682,7 @@ generate_spsc_producer_and_consumer!(
 /// assert_eq!(unsafe { slice[0].assume_init() }, 1);
 /// assert_eq!(unsafe { slice[1].assume_init() }, 2);
 /// ```
-pub fn new_cache_padded_bounded<T, const CAPACITY: usize>() -> (
+pub fn new_cache_padded_bounded<T: Send, const CAPACITY: usize>() -> (
     CachePaddedSPSCProducer<T, CAPACITY>,
     CachePaddedSPSCConsumer<T, CAPACITY>,
 ) {
@@ -676,8 +703,8 @@ pub fn new_cache_padded_bounded<T, const CAPACITY: usize>() -> (
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{Consumer, LockFreeConsumer, LockFreeProducer, Producer};
     use std::collections::VecDeque;
-    use crate::{Consumer, Producer};
 
     const CAPACITY: usize = 256;
 
@@ -685,10 +712,7 @@ mod tests {
     fn test_spsc_bounded_size() {
         let queue = SPSCBoundedQueue::<u8, CAPACITY>::new();
 
-        assert_eq!(
-            size_of_val(&queue),
-            CAPACITY + size_of::<LongAtomic>() * 2
-        );
+        assert_eq!(size_of_val(&queue), CAPACITY + size_of::<LongAtomic>() * 2);
 
         let cache_padded_queue = SPSCBoundedQueue::<u8, CAPACITY, CachePaddedLongAtomic>::new();
 
@@ -767,6 +791,87 @@ mod tests {
 
             let mut slice = [MaybeUninit::uninit(); BATCH_SIZE];
             consumer.pop_many(slice.as_mut_slice());
+
+            for j in 0..BATCH_SIZE {
+                let index = i * BATCH_SIZE + j;
+
+                assert_eq!(unsafe { slice[j].assume_init() }, index);
+            }
+        }
+    }
+
+    #[test]
+    fn test_spsc_lock_free_bounded_seq_insertions() {
+        let (producer, consumer) = new_bounded::<_, CAPACITY>();
+
+        for i in 0..CAPACITY * 100 {
+            producer.lock_free_maybe_push(i).unwrap();
+
+            assert_eq!(consumer.lock_free_pop().unwrap(), i);
+        }
+
+        for i in 0..CAPACITY {
+            producer.lock_free_maybe_push(i).unwrap();
+        }
+
+        assert_eq!(consumer.len(), CAPACITY);
+        assert_eq!(producer.len(), CAPACITY);
+        assert_eq!(consumer.capacity(), CAPACITY);
+    }
+
+    #[test]
+    fn test_spsc_lock_free_bounded_stealing() {
+        const TRIES: usize = 10;
+
+        let (producer1, consumer1) = new_bounded::<_, CAPACITY>();
+        let (producer2, consumer2) = new_bounded::<_, CAPACITY>();
+
+        let mut stolen = VecDeque::new();
+
+        for _ in 0..TRIES * 2 {
+            for i in 0..CAPACITY / 2 {
+                producer1.lock_free_maybe_push(i).unwrap();
+            }
+
+            consumer1.lock_free_steal_into(&producer2);
+
+            while let Ok(task) = consumer2.lock_free_pop() {
+                stolen.push_back(task);
+            }
+        }
+
+        assert!(producer2.is_empty());
+
+        let mut count = 0;
+
+        while let Ok(_) = consumer1.lock_free_pop() {
+            count += 1;
+        }
+
+        assert_eq!(count + stolen.len(), CAPACITY * TRIES);
+    }
+
+    #[test]
+    fn test_spsc_lock_free_bounded_many() {
+        const BATCH_SIZE: usize = 30;
+        const N: usize = BATCH_SIZE * 100;
+
+        let (producer, consumer) = new_bounded::<_, CAPACITY>();
+
+        for i in 0..N / BATCH_SIZE {
+            let slice = (0..BATCH_SIZE)
+                .map(|j| i * BATCH_SIZE + j)
+                .collect::<Vec<_>>();
+
+            unsafe {
+                producer.lock_free_maybe_push_many(&*slice).unwrap();
+            }
+
+            let mut slice = [MaybeUninit::uninit(); BATCH_SIZE];
+            assert_eq!(
+                consumer.lock_free_pop_many(slice.as_mut_slice()),
+                (BATCH_SIZE, false)
+            );
 
             for j in 0..BATCH_SIZE {
                 let index = i * BATCH_SIZE + j;

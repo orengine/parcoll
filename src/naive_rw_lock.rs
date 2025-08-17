@@ -67,7 +67,8 @@ impl<T, AtomicWrapper: Deref<Target = AtomicI32> + Default> Drop
 }
 
 /// A naive read-write lock.
-/// It can when and only when write operations are rare.
+/// It can be used when and only when write operations are extremely rare
+/// (less than 1% of all operations).
 /// In this case, it works much faster than [`std::sync::RwLock`].
 pub struct NaiveRWLock<
     T,
@@ -113,7 +114,7 @@ impl<T, AtomicWrapper: Deref<Target = AtomicI32> + Default> NaiveRWLock<T, Atomi
             }
         }
     }
-   
+
     /// Tries to acquire a write lock. Returns `None` if a read or write lock is held.
     pub fn try_write(&self) -> Option<NaiveRWLockWriteGuard<T, AtomicWrapper>> {
         match self
@@ -132,9 +133,9 @@ impl<T, AtomicWrapper: Deref<Target = AtomicI32> + Default> NaiveRWLock<T, Atomi
         loop {
             if let Some(guard) = self.try_write() {
                 return guard;
-            } else {
-                backoff.snooze();
             }
+
+            backoff.snooze();
         }
     }
 }

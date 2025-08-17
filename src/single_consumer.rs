@@ -1,4 +1,4 @@
-//! This module provides the [`SingleConsumer`], the [`SingleConsumerSpawner`], 
+//! This module provides the [`SingleConsumer`], the [`SingleConsumerSpawner`],
 //! the [`SingleLockFreeConsumerSpawner`] and the [`SingleLockFreeConsumer`] traits for
 //! single-consumer queues.
 
