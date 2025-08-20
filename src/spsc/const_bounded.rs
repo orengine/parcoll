@@ -18,8 +18,7 @@ use std::mem::{needs_drop, MaybeUninit};
 use std::ops::Deref;
 use std::sync::atomic::Ordering::{Acquire, Release};
 use std::{ptr, slice};
-
-// TODO add caching head + tail
+use std::cell::Cell;
 
 // Don't care about ABA because we can count that 16-bit and 32-bit processors never
 // insert + read (2 ^ 16) - 1 or (2 ^ 32) - 1 values while some consumer is preempted.
@@ -57,7 +56,9 @@ pub struct SPSCBoundedQueue<
     AtomicWrapper: Deref<Target = LongAtomic> + Default = NotCachePaddedLongAtomic,
 > {
     tail: AtomicWrapper,
+    cached_tail: Cell<LongNumber>,
     head: AtomicWrapper,
+    cached_head: Cell<LongNumber>,
     buffer: [MaybeUninit<T>; CAPACITY],
 }
 
@@ -71,7 +72,9 @@ impl<T: Send, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> +
         Self {
             buffer: [const { MaybeUninit::uninit() }; CAPACITY],
             tail: AtomicWrapper::default(),
+            cached_tail: Cell::new(0),
             head: AtomicWrapper::default(),
+            cached_head: Cell::new(0),
         }
     }
 
@@ -163,13 +166,19 @@ impl<T: Send, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> +
     #[inline]
     pub unsafe fn producer_maybe_push(&self, value: T) -> Result<(), T> {
         let tail = unsafe { self.tail.unsync_load() }; // only the producer can change tail
-        let head = self.head.load(SUSPICIOUS_RELAXED_ACQUIRE);
+        let mut head = self.cached_head.get();
 
-        if unlikely(Self::len(head, tail) == CAPACITY) {
-            return Err(value);
+        if unlikely(Self::len(head, tail) >= CAPACITY) {
+            self.cached_head.set(self.head.load(SUSPICIOUS_RELAXED_ACQUIRE));
+
+            if unlikely(head == self.cached_head.get()) {
+                return Err(value);
+            }
+
+            // Else the queue is not full
         }
 
-        debug_assert!(Self::len(head, tail) < CAPACITY);
+        debug_assert!(Self::len(self.cached_head.get(), tail) < CAPACITY);
 
         unsafe { self.push_unchecked(value, tail) };
 
@@ -209,13 +218,18 @@ impl<T: Send, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> +
     #[inline]
     pub unsafe fn producer_maybe_push_many(&self, slice: &[T]) -> Result<(), ()> {
         let mut tail = unsafe { self.tail.unsync_load() }; // only the producer can change tail
-        let head = self.head.load(SUSPICIOUS_RELAXED_ACQUIRE);
 
-        if unlikely(Self::len(head, tail) + slice.len() > CAPACITY) {
-            return Err(()); // don't have enough space
+        if unlikely(Self::len(self.cached_head.get(), tail) + slice.len() > CAPACITY) {
+            self.cached_head.set(self.head.load(SUSPICIOUS_RELAXED_ACQUIRE));
+
+            if unlikely(Self::len(self.cached_head.get(), tail) + slice.len() > CAPACITY) {
+                return Err(()); // don't have enough space
+            }
+
+            // We have enough space
         }
 
-        debug_assert!(Self::len(head, tail) + slice.len() <= CAPACITY);
+        debug_assert!(Self::len(self.cached_head.get(), tail) + slice.len() <= CAPACITY);
 
         tail = Self::copy_slice(self.buffer_mut_thin_ptr().cast(), tail, slice);
 
@@ -229,11 +243,11 @@ impl<T: Send, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> +
     /// # Safety
     ///
     /// The called should be the only producer and the safety conditions
-    /// from [`Producer::copy_and_commit_if`].
+    /// from [`SingleProducer::copy_and_commit_if`].
     ///
     /// # Panics
     ///
-    /// Read the doc at [`Producer::copy_and_commit_if`].
+    /// Read the doc at [`SingleProducer::copy_and_commit_if`].
     unsafe fn producer_copy_and_commit_if<FSuccess, FError>(
         &self,
         left: &[T],
@@ -287,8 +301,16 @@ impl<T: Send, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> +
     #[inline]
     pub unsafe fn consumer_pop_many(&self, dst: &mut [MaybeUninit<T>]) -> usize {
         let head = unsafe { self.head.unsync_load() }; // only consumer can change head
-        let tail = self.tail.load(Acquire);
-        let available = Self::len(head, tail);
+        let mut available = Self::len(head, self.cached_tail.get());
+
+        if unlikely(available < dst.len()) {
+            // Maybe values are not in cache
+
+            self.cached_tail.set(self.tail.load(Acquire));
+
+            available = Self::len(head, self.cached_tail.get());
+        }
+
         let n = dst.len().min(available);
 
         if n == 0 {
@@ -336,12 +358,14 @@ impl<T: Send, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> +
         }
 
         let src_head = unsafe { self.head.unsync_load() }; // only consumer can change head
-        let src_tail = self.tail.load(Acquire);
-        let n = Self::len(src_head, src_tail) / 2;
 
+        self.cached_tail.set(self.tail.load(Acquire)); // always load the latest tail
+
+        let mut n = Self::len(src_head, self.cached_tail.get()) / 2;
+
+        // we don't steal less than 4 by default
+        // because else we may lose more because of cache locality and NUMA awareness
         if !cfg!(feature = "always_steal") && n < 4 || n == 0 {
-            // we don't steal less than 4 by default
-            // because else we may lose more because of cache locality and NUMA awareness
             return 0;
         }
 
@@ -712,13 +736,16 @@ mod tests {
     fn test_spsc_bounded_size() {
         let queue = SPSCBoundedQueue::<u8, CAPACITY>::new();
 
-        assert_eq!(size_of_val(&queue), CAPACITY + size_of::<LongAtomic>() * 2);
+        assert_eq!(
+            size_of_val(&queue),
+            CAPACITY + size_of::<LongAtomic>() * 2 + 2 * align_of_val(&queue)
+        );
 
         let cache_padded_queue = SPSCBoundedQueue::<u8, CAPACITY, CachePaddedLongAtomic>::new();
 
         assert_eq!(
             size_of_val(&cache_padded_queue),
-            size_of::<CachePaddedLongAtomic>() * 2 + CAPACITY
+            size_of::<CachePaddedLongAtomic>() * 2 + CAPACITY + 2 * align_of_val(&cache_padded_queue)
         );
     }
 

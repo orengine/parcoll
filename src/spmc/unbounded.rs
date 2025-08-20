@@ -16,7 +16,7 @@ use crate::naive_rw_lock::NaiveRWLock;
 use crate::number_types::{NotCachePaddedAtomicU32, NotCachePaddedAtomicU64};
 use crate::suspicious_orders::SUSPICIOUS_RELAXED_ACQUIRE;
 use crate::sync_cell::{LockFreeSyncCell, SyncCell};
-use std::cell::UnsafeCell;
+use std::cell::{Cell, UnsafeCell};
 use std::marker::PhantomData;
 use std::mem::{needs_drop, MaybeUninit};
 use std::ops::Deref;
@@ -65,6 +65,7 @@ pub(crate) struct SPMCUnboundedQueue<
     /// and next sets a new id. The version id is monotonic.
     tail_and_version: AtomicU64Wrapper,
     head: AtomicU32Wrapper,
+    cached_head: Cell<u32>,
     last_version: SC,
     phantom_data: PhantomData<T>,
 }
@@ -81,6 +82,7 @@ where
         Self {
             tail_and_version: AtomicU64Wrapper::default(),
             head: AtomicU32Wrapper::default(),
+            cached_head: Cell::new(0),
             last_version: SC::from_value(Version::alloc_new(capacity, 0)),
             phantom_data: PhantomData,
         }
@@ -321,7 +323,7 @@ where
 
         let tail = unsafe { self.unsync_load_tail() }; // only the producer can change tail
         let (cached_version, tail) = self.create_new_version_and_write_it_but_not_update_tail(
-            self.head.load(SUSPICIOUS_RELAXED_ACQUIRE),
+            self.cached_head.get(),
             tail,
             new_capacity,
             version,
@@ -343,21 +345,32 @@ where
         // The producer always has the latest version.
 
         let tail = unsafe { self.unsync_load_tail() }; // only the producer can change tail
-        let mut head = self.head.load(SUSPICIOUS_RELAXED_ACQUIRE);
+        let mut head = self.cached_head.get();
 
         loop {
             if unlikely(head == tail) {
-                return None;
+                self.cached_head.set(self.head.load(SUSPICIOUS_RELAXED_ACQUIRE));
+
+                if unlikely(head == self.cached_head.get()) {
+                    return None;
+                }
+
+                head = self.cached_head.get();
             }
+
+            let new_head = head.wrapping_add(1);
 
             match self
                 .head
-                .compare_exchange_weak(head, head.wrapping_add(1), Release, Relaxed)
+                .compare_exchange_weak(head, new_head, Release, Relaxed)
             {
                 Ok(_) => {
                     // We are the only producer,
                     // so we can don't worry
                     // about someone overwriting the value before we read it
+
+                    self.cached_head.set(new_head);
+
                     return Some(unsafe {
                         version
                             .thin_ptr()
@@ -388,14 +401,22 @@ where
         // The producer always has the latest version.
 
         let tail = unsafe { self.unsync_load_tail() }; // only the producer can change tail
-        let mut head = self.head.load(SUSPICIOUS_RELAXED_ACQUIRE);
+        let mut head = self.cached_head.get();
 
         loop {
-            let available = Self::len(head, tail);
-            let n = dst.len().min(available);
+            let mut available = Self::len(head, tail);
+            let mut n = dst.len().min(available);
 
             if n == 0 {
-                return 0;
+                self.cached_head.set(self.head.load(SUSPICIOUS_RELAXED_ACQUIRE));
+
+                if unlikely(head == self.cached_head.get()) {
+                    return 0;
+                }
+
+                head = self.cached_head.get();
+                available = Self::len(head, tail);
+                n = dst.len().min(available);
             }
 
             debug_assert!(n <= version.capacity(), "Bug occurred, please report it.");
@@ -519,12 +540,18 @@ where
     #[inline]
     unsafe fn producer_push(&self, value: T, version: &mut CachedVersion<T>) {
         let tail = unsafe { self.unsync_load_tail() }; // only the producer can change tail
-        let head = self.head.load(SUSPICIOUS_RELAXED_ACQUIRE);
+        let mut head = self.cached_head.get();
 
-        if unlikely(Self::len(head, tail) == version.capacity()) {
-            unsafe { self.handle_overflow(head, tail, version, &[value]) };
+        if unlikely(Self::len(head, tail) >= version.capacity()) {
+            self.cached_head.set(self.head.load(SUSPICIOUS_RELAXED_ACQUIRE));
 
-            return;
+            if unlikely(head == self.cached_head.get()) {
+                unsafe { self.handle_overflow(head, tail, version, &[value]) };
+
+                return;
+            }
+
+            // The queue is not full
         }
 
         unsafe { self.push_unchecked(value, tail, version) };
@@ -578,12 +605,17 @@ where
     #[inline]
     unsafe fn producer_push_many(&self, slice: &[T], version: &mut CachedVersion<T>) {
         let mut tail = unsafe { self.unsync_load_tail() }; // only the producer can change tail
-        let head = self.head.load(SUSPICIOUS_RELAXED_ACQUIRE);
 
-        if unlikely(Self::len(head, tail) + slice.len() > version.capacity()) {
-            unsafe { self.handle_overflow(head, tail, version, slice) };
+        if unlikely(Self::len(self.cached_head.get(), tail) + slice.len() > version.capacity()) {
+            self.cached_head.set(self.head.load(SUSPICIOUS_RELAXED_ACQUIRE));
 
-            return;
+            if unlikely(Self::len(self.cached_head.get(), tail) + slice.len() > version.capacity()) {
+                unsafe { self.handle_overflow(self.cached_head.get(), tail, version, slice) };
+
+                return;
+            }
+
+            // The queue is not full
         }
 
         tail = Self::copy_slice(
@@ -1124,7 +1156,9 @@ macro_rules! generate_spmc_producer_and_consumer {
         where
             SC: SyncCell<LightArc<Version<T>>>
         {
-            fn spawn_multi_consumer(&self) -> impl $crate::multi_consumer::MultiConsumer<T> {
+            type SpawnedConsumer = $consumer_name<T, SC>;
+
+            fn spawn_multi_consumer(&self) -> Self::SpawnedConsumer {
                 $consumer_name {
                     inner: self.inner.clone(),
                     cached_version: UnsafeCell::new(self.cached_version().clone()),
@@ -1137,7 +1171,9 @@ macro_rules! generate_spmc_producer_and_consumer {
         where
             SC: SyncCell<LightArc<Version<T>>> + LockFreeSyncCell<LightArc<Version<T>>>
         {
-            fn spawn_multi_lock_free_consumer(&self) -> impl $crate::multi_consumer::MultiLockFreeConsumer<T> {
+            type SpawnedLockFreeConsumer = $consumer_name<T, SC>;
+
+            fn spawn_multi_lock_free_consumer(&self) -> Self::SpawnedLockFreeConsumer {
                 $consumer_name {
                     inner: self.inner.clone(),
                     cached_version: UnsafeCell::new(self.cached_version().clone()),

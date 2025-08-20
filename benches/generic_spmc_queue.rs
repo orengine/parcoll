@@ -1,7 +1,8 @@
 //! Generic traits for queue benchmarking.
 
-use parcoll::{spmc, LightArc};
+use parcoll::{spmc, Consumer, LightArc, Producer};
 use st3;
+use parcoll::multi_consumer::MultiConsumerSpawner;
 
 /// Error returned on stealing failure.
 pub enum GenericStealError {
@@ -11,12 +12,10 @@ pub enum GenericStealError {
 
 /// Generic interface for a queue worker.
 pub trait GenericWorker<T>: Send {
-    type S: GenericStealer<T, W = Self>;
-
     fn new() -> Self;
     fn push(&self, item: T) -> Result<(), T>;
     fn pop(&self) -> Option<T>;
-    fn stealer(&self) -> Self::S;
+    fn stealer(&self) -> impl GenericStealer<T, W = Self>;
 }
 
 /// Generic interface for a queue stealer.
@@ -30,8 +29,6 @@ pub trait GenericStealer<T>: Clone + Send {
 
 /// Generic work-stealing queue traits implementation for St3 (LIFO).
 impl<T: Send> GenericWorker<T> for st3::lifo::Worker<T> {
-    type S = st3::lifo::Stealer<T>;
-
     fn new() -> Self {
         Self::new(256)
     }
@@ -44,7 +41,7 @@ impl<T: Send> GenericWorker<T> for st3::lifo::Worker<T> {
         self.pop()
     }
 
-    fn stealer(&self) -> Self::S {
+    fn stealer(&self) -> impl GenericStealer<T, W = Self> {
         self.stealer()
     }
 }
@@ -67,18 +64,19 @@ impl<T: Send> GenericStealer<T> for st3::lifo::Stealer<T> {
 
 /// Generic work-stealing queue traits implementation for St3 (FIFO).
 impl<T: Send> GenericWorker<T> for st3::fifo::Worker<T> {
-    type S = st3::fifo::Stealer<T>;
-
     fn new() -> Self {
         Self::new(256)
     }
+
     fn push(&self, item: T) -> Result<(), T> {
         self.push(item)
     }
+
     fn pop(&self) -> Option<T> {
         self.pop()
     }
-    fn stealer(&self) -> Self::S {
+
+    fn stealer(&self) -> impl GenericStealer<T, W = Self> {
         self.stealer()
     }
 }
@@ -103,7 +101,7 @@ impl<T: Send> GenericStealer<T> for st3::fifo::Stealer<T> {
 
 // region crossbeam
 
-/// Newtypes distinguishing between FIFO and LIFO crossbeam queues.
+/// New types distinguishing between FIFO and LIFO crossbeam queues.
 pub struct CrossbeamFifoWorker<T>(crossbeam_deque::Worker<T>);
 pub struct CrossbeamFifoStealer<T>(crossbeam_deque::Stealer<T>);
 pub struct CrossbeamLifoWorker<T>(crossbeam_deque::Worker<T>);
@@ -111,8 +109,6 @@ pub struct CrossbeamLifoStealer<T>(crossbeam_deque::Stealer<T>);
 
 /// Generic work-stealing queue traits implementation for crossbeam-deque (FIFO).
 impl<T: Send> GenericWorker<T> for CrossbeamFifoWorker<T> {
-    type S = CrossbeamFifoStealer<T>;
-
     fn new() -> Self {
         Self(crossbeam_deque::Worker::new_fifo())
     }
@@ -127,7 +123,7 @@ impl<T: Send> GenericWorker<T> for CrossbeamFifoWorker<T> {
         self.0.pop()
     }
 
-    fn stealer(&self) -> Self::S {
+    fn stealer(&self) -> impl GenericStealer<T, W = Self> {
         CrossbeamFifoStealer(self.0.stealer())
     }
 }
@@ -150,20 +146,21 @@ impl<T: Send> GenericStealer<T> for CrossbeamFifoStealer<T> {
 
 /// Generic work-stealing queue traits implementation for crossbeam-deque (LIFO).
 impl<T: Send> GenericWorker<T> for CrossbeamLifoWorker<T> {
-    type S = CrossbeamLifoStealer<T>;
-
     fn new() -> Self {
         Self(crossbeam_deque::Worker::new_lifo())
     }
+
     fn push(&self, item: T) -> Result<(), T> {
         self.0.push(item);
 
         Ok(())
     }
+
     fn pop(&self) -> Option<T> {
         self.0.pop()
     }
-    fn stealer(&self) -> Self::S {
+
+    fn stealer(&self) -> impl GenericStealer<T, W = Self> {
         CrossbeamLifoStealer(self.0.stealer())
     }
 }
@@ -185,8 +182,6 @@ impl<T: Send> GenericStealer<T> for CrossbeamLifoStealer<T> {
 }
 
 impl<T: Send> GenericWorker<T> for LightArc<crossbeam_queue::ArrayQueue<T>> {
-    type S = LightArc<crossbeam_queue::ArrayQueue<T>>;
-
     fn new() -> Self {
         LightArc::new(crossbeam_queue::ArrayQueue::new(256))
     }
@@ -199,7 +194,7 @@ impl<T: Send> GenericWorker<T> for LightArc<crossbeam_queue::ArrayQueue<T>> {
         crossbeam_queue::ArrayQueue::pop(self)
     }
 
-    fn stealer(&self) -> Self::S {
+    fn stealer(&self) -> impl GenericStealer<T, W = Self> {
         self.clone()
     }
 }
@@ -226,8 +221,6 @@ impl<T: Send> GenericStealer<T> for LightArc<crossbeam_queue::ArrayQueue<T>> {
 }
 
 impl<T: Send> GenericWorker<T> for LightArc<crossbeam_queue::SegQueue<T>> {
-    type S = LightArc<crossbeam_queue::SegQueue<T>>;
-
     fn new() -> Self {
         LightArc::new(crossbeam_queue::SegQueue::new())
     }
@@ -242,7 +235,7 @@ impl<T: Send> GenericWorker<T> for LightArc<crossbeam_queue::SegQueue<T>> {
         crossbeam_queue::SegQueue::pop(self)
     }
 
-    fn stealer(&self) -> Self::S {
+    fn stealer(&self) -> impl GenericStealer<T, W = Self> {
         self.clone()
     }
 }
@@ -272,8 +265,6 @@ impl<T: Send> GenericStealer<T> for LightArc<crossbeam_queue::SegQueue<T>> {
 impl<T: Send, const CAPACITY: usize> GenericWorker<T>
     for spmc::CachePaddedSPMCProducer<T, CAPACITY>
 {
-    type S = spmc::CachePaddedSPMCConsumer<T, CAPACITY>;
-
     fn new() -> Self {
         let (producer, _) = spmc::new_cache_padded_bounded();
 
@@ -281,15 +272,15 @@ impl<T: Send, const CAPACITY: usize> GenericWorker<T>
     }
 
     fn push(&self, item: T) -> Result<(), T> {
-        spmc::Producer::maybe_push(self, item)
+        parcoll::Producer::maybe_push(self, item)
     }
 
     fn pop(&self) -> Option<T> {
-        spmc::Producer::pop(self)
+        parcoll::spmc_producer::SPMCProducer::pop(self)
     }
 
-    fn stealer(&self) -> Self::S {
-        spmc::ConsumerSpawner::spawn_consumer(self)
+    fn stealer(&self) -> impl GenericStealer<T, W = Self> {
+        self.spawn_multi_consumer()
     }
 }
 
@@ -299,7 +290,7 @@ impl<T: Send, const CAPACITY: usize> GenericStealer<T>
     type W = spmc::CachePaddedSPMCProducer<T, CAPACITY>;
 
     fn steal_batch(&self, worker: &Self::W) -> Result<(), GenericStealError> {
-        let n = spmc::Consumer::steal_into(self, worker);
+        let n = self.steal_into(worker);
 
         if n != 0 {
             Ok(())
@@ -310,8 +301,6 @@ impl<T: Send, const CAPACITY: usize> GenericStealer<T>
 }
 
 impl<T: Send> GenericWorker<T> for spmc::CachePaddedSPMCUnboundedProducer<T> {
-    type S = spmc::CachePaddedSPMCUnboundedConsumer<T>;
-
     fn new() -> Self {
         let (producer, _) = spmc::new_cache_padded_unbounded();
 
@@ -319,15 +308,15 @@ impl<T: Send> GenericWorker<T> for spmc::CachePaddedSPMCUnboundedProducer<T> {
     }
 
     fn push(&self, item: T) -> Result<(), T> {
-        spmc::Producer::maybe_push(self, item)
+        self.maybe_push(item)
     }
 
     fn pop(&self) -> Option<T> {
-        spmc::Producer::pop(self)
+        parcoll::spmc_producer::SPMCProducer::pop(self)
     }
 
-    fn stealer(&self) -> Self::S {
-        spmc::ConsumerSpawner::spawn_consumer(self)
+    fn stealer(&self) -> impl GenericStealer<T, W = Self> {
+        parcoll::multi_consumer::MultiConsumerSpawner::spawn_multi_consumer(self)
     }
 }
 
@@ -335,7 +324,7 @@ impl<T: Send> GenericStealer<T> for spmc::CachePaddedSPMCUnboundedConsumer<T> {
     type W = spmc::CachePaddedSPMCUnboundedProducer<T>;
 
     fn steal_batch(&self, worker: &Self::W) -> Result<(), GenericStealError> {
-        let n = spmc::Consumer::steal_into(self, worker);
+        let n = self.steal_into(worker);
 
         if n != 0 {
             Ok(())

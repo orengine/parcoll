@@ -2,10 +2,11 @@ use crate::generic_spmc_queue::{
     CrossbeamFifoWorker, CrossbeamLifoWorker, GenericStealer, GenericWorker,
 };
 use criterion::{criterion_group, criterion_main, Criterion};
-use parcoll::spsc::Consumer;
 use parcoll::{spsc, LightArc};
 use std::sync::atomic::AtomicU64;
 use std::time::Instant;
+use parcoll::single_consumer::SingleConsumer;
+use parcoll::single_producer::SingleProducer;
 
 pub(crate) mod generic_spmc_queue;
 
@@ -36,8 +37,8 @@ pub fn push_pop<W: GenericWorker<usize>, const N: usize>(name: &str, c: &mut Cri
 
 pub fn push_pop_spsc<P, C, Creator, const N: usize>(name: &str, creator: Creator, c: &mut Criterion)
 where
-    P: spsc::Producer<usize>,
-    C: Consumer<usize>,
+    P: SingleProducer<usize>,
+    C: SingleConsumer<usize>,
     Creator: Fn() -> (P, C),
 {
     let (producer, consumer) = creator();
