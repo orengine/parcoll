@@ -44,7 +44,11 @@ where
 
         'outer: loop {
             for _ in 0..RAND.fetch_add(1, Ordering::Relaxed) % 10 {
-                while producer.maybe_push(i).is_err() {}
+                let backoff = Backoff::new();
+
+                while producer.maybe_push(i).is_err() {
+                    backoff.snooze();
+                }
 
                 i += 1;
 
@@ -69,6 +73,8 @@ where
     let steal_periodically = move |consumer: &Consumer, counter: Arc<AtomicUsize>| -> Vec<usize> {
         let mut stats = vec![0; N];
         let (dest_producer, _) = creator();
+        let backoff = Backoff::new();
+        let mut backoff_steps = 0;
 
         loop {
             consumer.steal_into(&dest_producer);
@@ -76,6 +82,16 @@ where
             while let Some(i) = dest_producer.pop() {
                 stats[i] += 1;
                 counter.fetch_add(1, Ordering::Relaxed);
+            }
+
+            backoff.snooze();
+
+            if backoff_steps == 7 {
+                backoff.reset();
+
+                backoff_steps = 0;
+            } else {
+                backoff_steps += 1;
             }
 
             let count = counter.load(Ordering::Relaxed);
