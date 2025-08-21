@@ -14,12 +14,12 @@ use crate::number_types::{
 };
 use crate::suspicious_orders::SUSPICIOUS_RELAXED_ACQUIRE;
 use crate::{LockFreePopErr, LockFreePushErr, LockFreePushManyErr};
+use std::cell::{Cell, UnsafeCell};
 use std::marker::PhantomData;
 use std::mem::{needs_drop, MaybeUninit};
 use std::ops::Deref;
 use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
 use std::{ptr, slice};
-use std::cell::{Cell, UnsafeCell};
 
 // Don't care about ABA because we can count that 16-bit and 32-bit processors never
 // insert + read (2 ^ 16) - 1 or (2 ^ 32) - 1 values while some consumer is preempted.
@@ -152,7 +152,8 @@ impl<T: Send, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> +
     #[inline]
     pub unsafe fn producer_len(&self) -> usize {
         let tail = unsafe { self.tail.unsync_load() }; // only the producer can change tail
-        self.cached_head.set(self.head.load(SUSPICIOUS_RELAXED_ACQUIRE));
+        self.cached_head
+            .set(self.head.load(SUSPICIOUS_RELAXED_ACQUIRE));
 
         Self::len(self.cached_head.get(), tail)
     }
@@ -170,7 +171,8 @@ impl<T: Send, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> +
 
         loop {
             if unlikely(head == tail) {
-                self.cached_head.set(self.head.load(SUSPICIOUS_RELAXED_ACQUIRE));
+                self.cached_head
+                    .set(self.head.load(SUSPICIOUS_RELAXED_ACQUIRE));
 
                 if head == self.cached_head.get() {
                     return None;
@@ -221,7 +223,8 @@ impl<T: Send, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> +
             let mut n = dst.len().min(available);
 
             if n == 0 {
-                self.cached_head.set(self.head.load(SUSPICIOUS_RELAXED_ACQUIRE));
+                self.cached_head
+                    .set(self.head.load(SUSPICIOUS_RELAXED_ACQUIRE));
 
                 if unlikely(head == self.cached_head.get()) {
                     return 0;
@@ -236,12 +239,10 @@ impl<T: Send, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> +
 
             let new_head = head.wrapping_add(n as LongNumber);
 
-            match self.head.compare_exchange_weak(
-                head,
-                new_head,
-                Release,
-                Relaxed,
-            ) {
+            match self
+                .head
+                .compare_exchange_weak(head, new_head, Release, Relaxed)
+            {
                 Ok(_) => {
                     // We are the only producer,
                     // so we can don't worry about someone overwriting the value before we read it.
@@ -585,7 +586,8 @@ impl<T: Send, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> +
         let head = self.cached_head.get();
 
         if unlikely(Self::len(head, tail) == CAPACITY) {
-            self.cached_head.set(self.head.load(SUSPICIOUS_RELAXED_ACQUIRE));
+            self.cached_head
+                .set(self.head.load(SUSPICIOUS_RELAXED_ACQUIRE));
 
             if unlikely(head == self.cached_head.get()) {
                 self.handle_overflow_one(tail, head, batch_receiver, value);
@@ -642,7 +644,8 @@ impl<T: Send, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> +
         let head = self.cached_head.get();
 
         if unlikely(Self::len(head, tail) >= CAPACITY) {
-            self.cached_head.set(self.head.load(SUSPICIOUS_RELAXED_ACQUIRE));
+            self.cached_head
+                .set(self.head.load(SUSPICIOUS_RELAXED_ACQUIRE));
 
             if unlikely(head == self.cached_head.get()) {
                 return Err(value);
@@ -697,7 +700,8 @@ impl<T: Send, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> +
         let mut tail = unsafe { self.tail.unsync_load() }; // only the producer can change tail
 
         if unlikely(Self::len(self.cached_head.get(), tail) + slice.len() > CAPACITY) {
-            self.cached_head.set(self.head.load(SUSPICIOUS_RELAXED_ACQUIRE));
+            self.cached_head
+                .set(self.head.load(SUSPICIOUS_RELAXED_ACQUIRE));
 
             if unlikely(Self::len(self.cached_head.get(), tail) + slice.len() > CAPACITY) {
                 self.handle_overflow_many(tail, self.cached_head.get(), batch_receiver, slice);
@@ -728,10 +732,16 @@ impl<T: Send, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> +
         let mut tail = unsafe { self.tail.unsync_load() }; // only the producer can change tail
 
         if unlikely(Self::len(self.cached_head.get(), tail) + slice.len() > CAPACITY) {
-            self.cached_head.set(self.head.load(SUSPICIOUS_RELAXED_ACQUIRE));
+            self.cached_head
+                .set(self.head.load(SUSPICIOUS_RELAXED_ACQUIRE));
 
             if unlikely(Self::len(self.cached_head.get(), tail) + slice.len() > CAPACITY) {
-                self.handle_lock_free_overflow_many(tail, self.cached_head.get(), batch_receiver, slice)?;
+                self.handle_lock_free_overflow_many(
+                    tail,
+                    self.cached_head.get(),
+                    batch_receiver,
+                    slice,
+                )?;
 
                 return Ok(());
             }
@@ -756,7 +766,8 @@ impl<T: Send, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> +
         let mut tail = unsafe { self.tail.unsync_load() }; // only the producer can change tail
 
         if unlikely(Self::len(self.cached_head.get(), tail) + slice.len() > CAPACITY) {
-            self.cached_head.set(self.head.load(SUSPICIOUS_RELAXED_ACQUIRE));
+            self.cached_head
+                .set(self.head.load(SUSPICIOUS_RELAXED_ACQUIRE));
 
             if unlikely(Self::len(self.cached_head.get(), tail) + slice.len() > CAPACITY) {
                 return Err(()); // full
@@ -1121,7 +1132,7 @@ macro_rules! generate_spmc_producer_and_consumer {
             for $producer_name<T, CAPACITY>
         {
             type SpawnedConsumer = $consumer_name<T, CAPACITY>;
-            
+
             fn spawn_multi_consumer(&self) -> Self::SpawnedConsumer {
                 $consumer_name {
                     inner: self.inner.clone(),
@@ -1134,10 +1145,8 @@ macro_rules! generate_spmc_producer_and_consumer {
             for $producer_name<T, CAPACITY>
         {
             type SpawnedLockFreeConsumer = $consumer_name<T, CAPACITY>;
-            
-            fn spawn_multi_lock_free_consumer(
-                &self,
-            ) -> Self::SpawnedLockFreeConsumer {
+
+            fn spawn_multi_lock_free_consumer(&self) -> Self::SpawnedLockFreeConsumer {
                 $consumer_name {
                     inner: self.inner.clone(),
                     _non_sync: PhantomData,
@@ -1420,10 +1429,10 @@ pub fn new_cache_padded_bounded<T: Send, const CAPACITY: usize>() -> (
 mod tests {
     use super::*;
     use crate::mutex_vec_queue::MutexVecQueue;
+    use crate::single_producer::{SingleLockFreeProducer, SingleProducer};
     use crate::spmc_producer::{SPMCLockFreeProducer, SPMCProducer};
     use crate::{Consumer, LockFreeConsumer, Producer};
     use std::collections::VecDeque;
-    use crate::single_producer::{SingleLockFreeProducer, SingleProducer};
 
     const CAPACITY: usize = 16;
 
@@ -1431,7 +1440,10 @@ mod tests {
     fn test_spmc_bounded_size() {
         let queue = SPMCBoundedQueue::<u8, CAPACITY>::new();
 
-        assert_eq!(size_of_val(&queue), CAPACITY + size_of::<LongAtomic>() * 2 + align_of_val(&queue));
+        assert_eq!(
+            size_of_val(&queue),
+            CAPACITY + size_of::<LongAtomic>() * 2 + align_of_val(&queue)
+        );
 
         let cache_padded_queue = SPMCBoundedQueue::<u8, CAPACITY, CachePaddedLongAtomic>::new();
 
@@ -1450,10 +1462,10 @@ mod tests {
             producer.push(i, &global_queue);
         }
 
-        let (mut new_producer, _) = new_bounded::<_, CAPACITY>();
+        let (new_producer, _) = new_bounded::<_, CAPACITY>();
 
         global_queue
-            .move_batch_to_producer(&mut new_producer, producer.capacity() - producer.len());
+            .move_batch_to_producer(&new_producer, producer.capacity() - producer.len());
 
         assert_eq!(
             producer.len() + new_producer.len() + global_queue.len(),
@@ -1497,7 +1509,7 @@ mod tests {
 
         let mut count = 0;
 
-        while let Some(_) = producer1.pop() {
+        while producer1.pop().is_some() {
             count += 1;
         }
 
@@ -1518,16 +1530,16 @@ mod tests {
                 .collect::<Vec<_>>();
 
             unsafe {
-                producer.maybe_push_many(&*slice).unwrap();
+                producer.maybe_push_many(&slice).unwrap();
             }
 
             let mut slice = [MaybeUninit::uninit(); BATCH_SIZE];
             producer.pop_many(slice.as_mut_slice());
 
-            for j in 0..BATCH_SIZE {
+            for (j, item) in slice.iter().enumerate().take(BATCH_SIZE) {
                 let index = i * BATCH_SIZE + j;
 
-                assert_eq!(unsafe { slice[j].assume_init() }, index);
+                assert_eq!(unsafe { item.assume_init() }, index);
             }
         }
 
@@ -1537,7 +1549,7 @@ mod tests {
                 .collect::<Vec<_>>();
 
             unsafe {
-                producer.push_many(&*slice, &global_queue);
+                producer.push_many(&slice, &global_queue);
             }
 
             assert!(global_queue.is_empty());
@@ -1545,10 +1557,10 @@ mod tests {
             let mut slice = [MaybeUninit::uninit(); BATCH_SIZE];
             consumer.pop_many(slice.as_mut_slice());
 
-            for j in 0..BATCH_SIZE {
+            for (j, item) in slice.iter().enumerate().take(BATCH_SIZE) {
                 let index = i * BATCH_SIZE + j;
 
-                assert_eq!(unsafe { slice[j].assume_init() }, index);
+                assert_eq!(unsafe { item.assume_init() }, index);
             }
         }
     }
@@ -1562,10 +1574,10 @@ mod tests {
             producer.lock_free_push(i, &global_queue).unwrap();
         }
 
-        let (mut new_producer, _) = new_bounded::<_, CAPACITY>();
+        let (new_producer, _) = new_bounded::<_, CAPACITY>();
 
         global_queue
-            .move_batch_to_producer(&mut new_producer, producer.capacity() - producer.len());
+            .move_batch_to_producer(&new_producer, producer.capacity() - producer.len());
 
         assert_eq!(
             producer.len() + new_producer.len() + global_queue.len(),
@@ -1573,11 +1585,11 @@ mod tests {
         );
 
         for _ in 0..producer.len() {
-            assert!(producer.lock_free_pop().is_ok());
+            producer.lock_free_pop().unwrap();
         }
 
         for _ in 0..new_producer.len() {
-            assert!(new_producer.lock_free_pop().is_ok());
+            new_producer.lock_free_pop().unwrap();
         }
     }
 
@@ -1609,7 +1621,7 @@ mod tests {
 
         let mut count = 0;
 
-        while let Ok(_) = producer1.lock_free_pop() {
+        while producer1.lock_free_pop().is_ok() {
             count += 1;
         }
 
@@ -1630,7 +1642,7 @@ mod tests {
                 .collect::<Vec<_>>();
 
             unsafe {
-                producer.lock_free_maybe_push_many(&*slice).unwrap();
+                producer.lock_free_maybe_push_many(&slice).unwrap();
             }
 
             let mut slice = [MaybeUninit::uninit(); BATCH_SIZE];
@@ -1640,10 +1652,10 @@ mod tests {
                 (BATCH_SIZE, false)
             );
 
-            for j in 0..BATCH_SIZE {
+            for (j, item) in slice.iter().enumerate().take(BATCH_SIZE) {
                 let index = i * BATCH_SIZE + j;
 
-                assert_eq!(unsafe { slice[j].assume_init() }, index);
+                assert_eq!(unsafe { item.assume_init() }, index);
             }
         }
 
@@ -1654,7 +1666,7 @@ mod tests {
 
             unsafe {
                 producer
-                    .lock_free_push_many(&*slice, &global_queue)
+                    .lock_free_push_many(&slice, &global_queue)
                     .unwrap();
             }
 
@@ -1667,10 +1679,10 @@ mod tests {
                 (BATCH_SIZE, false)
             );
 
-            for j in 0..BATCH_SIZE {
+            for (j, item) in slice.iter().enumerate().take(BATCH_SIZE) {
                 let index = i * BATCH_SIZE + j;
 
-                assert_eq!(unsafe { slice[j].assume_init() }, index);
+                assert_eq!(unsafe { item.assume_init() }, index);
             }
         }
     }

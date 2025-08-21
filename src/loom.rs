@@ -1,14 +1,15 @@
-use std::thread::spawn;
-use std::time::{Duration, Instant};
+#![cfg(all(parcoll_loom, test))]
+use parcoll::backoff::Backoff;
 use parcoll::multi_consumer::MultiConsumer;
+use parcoll::multi_producer::MultiProducer;
+use parcoll::single_producer::SingleProducer;
 use parcoll::spmc::{
     new_bounded, new_cache_padded_bounded, new_cache_padded_unbounded, new_unbounded,
 };
 use parcoll::spmc_producer::SPMCProducer;
 use parcoll::{mpmc, spsc, Consumer, Producer};
-use parcoll::backoff::Backoff;
-use parcoll::multi_producer::MultiProducer;
-use parcoll::single_producer::SingleProducer;
+use std::thread::spawn;
+use std::time::{Duration, Instant};
 
 fn loom_spmc_basic_steal<P, C, Cr>(creator: Cr)
 where

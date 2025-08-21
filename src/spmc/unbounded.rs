@@ -182,7 +182,8 @@ where
     #[inline]
     unsafe fn producer_len(&self) -> usize {
         let tail = unsafe { self.unsync_load_tail() }; // only the producer can change tail
-        self.cached_head.set(self.head.load(SUSPICIOUS_RELAXED_ACQUIRE));
+        self.cached_head
+            .set(self.head.load(SUSPICIOUS_RELAXED_ACQUIRE));
 
         // We can avoid checking the version
         // because the producer always has the latest version.
@@ -349,7 +350,8 @@ where
 
         loop {
             if unlikely(head == tail) {
-                self.cached_head.set(self.head.load(SUSPICIOUS_RELAXED_ACQUIRE));
+                self.cached_head
+                    .set(self.head.load(SUSPICIOUS_RELAXED_ACQUIRE));
 
                 if unlikely(head == self.cached_head.get()) {
                     return None;
@@ -408,7 +410,8 @@ where
             let mut n = dst.len().min(available);
 
             if n == 0 {
-                self.cached_head.set(self.head.load(SUSPICIOUS_RELAXED_ACQUIRE));
+                self.cached_head
+                    .set(self.head.load(SUSPICIOUS_RELAXED_ACQUIRE));
 
                 if unlikely(head == self.cached_head.get()) {
                     return 0;
@@ -543,7 +546,8 @@ where
         let head = self.cached_head.get();
 
         if unlikely(Self::len(head, tail) >= version.capacity()) {
-            self.cached_head.set(self.head.load(SUSPICIOUS_RELAXED_ACQUIRE));
+            self.cached_head
+                .set(self.head.load(SUSPICIOUS_RELAXED_ACQUIRE));
 
             if unlikely(head == self.cached_head.get()) {
                 unsafe { self.handle_overflow(head, tail, version, &[value]) };
@@ -607,9 +611,11 @@ where
         let mut tail = unsafe { self.unsync_load_tail() }; // only the producer can change tail
 
         if unlikely(Self::len(self.cached_head.get(), tail) + slice.len() > version.capacity()) {
-            self.cached_head.set(self.head.load(SUSPICIOUS_RELAXED_ACQUIRE));
+            self.cached_head
+                .set(self.head.load(SUSPICIOUS_RELAXED_ACQUIRE));
 
-            if unlikely(Self::len(self.cached_head.get(), tail) + slice.len() > version.capacity()) {
+            if unlikely(Self::len(self.cached_head.get(), tail) + slice.len() > version.capacity())
+            {
                 unsafe { self.handle_overflow(self.cached_head.get(), tail, version, slice) };
 
                 return;
@@ -1074,7 +1080,7 @@ macro_rules! generate_spmc_producer_and_consumer {
 
                 Ok(())
             }
-            
+
             unsafe fn copy_and_commit_if<F, FSuccess, FError>(&self, right: &[T], left: &[T], f: F) -> Result<FSuccess, FError>
             where
                 F: FnOnce() -> Result<FSuccess, FError>
@@ -1490,11 +1496,11 @@ pub fn new_cache_padded_unbounded<T: Send>() -> (
 mod tests {
     use super::*;
     use crate::mutex_vec_queue::MutexVecQueue;
+    use crate::single_producer::{SingleLockFreeProducer, SingleProducer};
     use crate::spmc_producer::{SPMCLockFreeProducer, SPMCProducer};
     use crate::sync_cell::LockFreeSyncCellMock;
     use crate::{Consumer, LockFreeConsumer, Producer};
     use std::collections::VecDeque;
-    use crate::single_producer::{SingleLockFreeProducer, SingleProducer};
 
     const N: usize = 16000;
     const BATCH_SIZE: usize = 10;
@@ -1525,8 +1531,8 @@ mod tests {
 
             assert_eq!(consumer.pop_many(slice.as_mut_slice()), BATCH_SIZE);
 
-            for j in 0..BATCH_SIZE {
-                assert_eq!(unsafe { slice[j].assume_init() }, i * BATCH_SIZE + j);
+            for (j, item) in slice.iter().enumerate().take(BATCH_SIZE) {
+                assert_eq!(unsafe { item.assume_init() }, i * BATCH_SIZE + j);
             }
         }
     }
@@ -1560,7 +1566,7 @@ mod tests {
 
         let mut count = 0;
 
-        while let Some(_) = producer1.pop() {
+        while producer1.pop().is_some() {
             count += 1;
         }
 
@@ -1581,16 +1587,16 @@ mod tests {
                 .collect::<Vec<_>>();
 
             unsafe {
-                producer.maybe_push_many(&*slice).unwrap();
+                producer.maybe_push_many(&slice).unwrap();
             }
 
             let mut slice = [MaybeUninit::uninit(); BATCH_SIZE];
             producer.pop_many(slice.as_mut_slice());
 
-            for j in 0..BATCH_SIZE {
+            for (j, item) in slice.iter().enumerate().take(BATCH_SIZE) {
                 let index = i * BATCH_SIZE + j;
 
-                assert_eq!(unsafe { slice[j].assume_init() }, index);
+                assert_eq!(unsafe { item.assume_init() }, index);
             }
         }
 
@@ -1600,7 +1606,7 @@ mod tests {
                 .collect::<Vec<_>>();
 
             unsafe {
-                producer.push_many(&*slice, &global_queue);
+                producer.push_many(&slice, &global_queue);
             }
 
             assert!(global_queue.is_empty());
@@ -1609,10 +1615,10 @@ mod tests {
 
             consumer.pop_many(slice.as_mut_slice());
 
-            for j in 0..BATCH_SIZE {
+            for (j, item) in slice.iter().enumerate().take(BATCH_SIZE) {
                 let index = i * BATCH_SIZE + j;
 
-                assert_eq!(unsafe { slice[j].assume_init() }, index);
+                assert_eq!(unsafe { item.assume_init() }, index);
             }
         }
     }
@@ -1646,8 +1652,8 @@ mod tests {
 
             assert_eq!(consumer.pop_many(slice.as_mut_slice()), BATCH_SIZE);
 
-            for j in 0..BATCH_SIZE {
-                assert_eq!(unsafe { slice[j].assume_init() }, i * BATCH_SIZE + j);
+            for (j, item) in slice.iter().enumerate().take(BATCH_SIZE) {
+                assert_eq!(unsafe { item.assume_init() }, i * BATCH_SIZE + j);
             }
         }
     }
@@ -1683,7 +1689,7 @@ mod tests {
 
         let mut count = 0;
 
-        while let Ok(_) = producer1.lock_free_pop() {
+        while producer1.lock_free_pop().is_ok() {
             count += 1;
         }
 
@@ -1705,7 +1711,7 @@ mod tests {
                 .collect::<Vec<_>>();
 
             unsafe {
-                producer.lock_free_maybe_push_many(&*slice).unwrap();
+                producer.lock_free_maybe_push_many(&slice).unwrap();
             }
 
             let mut slice = [MaybeUninit::uninit(); BATCH_SIZE];
@@ -1714,10 +1720,10 @@ mod tests {
                 (BATCH_SIZE, false)
             );
 
-            for j in 0..BATCH_SIZE {
+            for (j, item) in slice.iter().enumerate().take(BATCH_SIZE) {
                 let index = i * BATCH_SIZE + j;
 
-                assert_eq!(unsafe { slice[j].assume_init() }, index);
+                assert_eq!(unsafe { item.assume_init() }, index);
             }
         }
 
@@ -1728,7 +1734,7 @@ mod tests {
 
             unsafe {
                 producer
-                    .lock_free_push_many(&*slice, &global_queue)
+                    .lock_free_push_many(&slice, &global_queue)
                     .unwrap();
             }
 
@@ -1741,10 +1747,10 @@ mod tests {
                 (BATCH_SIZE, false)
             );
 
-            for j in 0..BATCH_SIZE {
+            for (j, item) in slice.iter().enumerate().take(BATCH_SIZE) {
                 let index = i * BATCH_SIZE + j;
 
-                assert_eq!(unsafe { slice[j].assume_init() }, index);
+                assert_eq!(unsafe { item.assume_init() }, index);
             }
         }
     }

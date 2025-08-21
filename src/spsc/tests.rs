@@ -13,6 +13,7 @@ use std::thread::spawn;
 
 static RAND: AtomicUsize = AtomicUsize::new(4);
 
+#[allow(clippy::uninlined_format_args, reason = "Else cargo shows a warning")]
 fn test_spsc_multi_threaded_steal<Producer, Consumer>(creator: fn() -> (Producer, Consumer))
 where
     Producer: ProducerExt<usize> + SingleProducer<usize> + Send + 'static,
@@ -35,7 +36,7 @@ where
 
         'outer: loop {
             for _ in 0..RAND.fetch_add(1, Ordering::Relaxed) % 1000 {
-                while let Err(_) = producer.maybe_push(i) {}
+                while producer.maybe_push(i).is_err() {}
 
                 i += 1;
 
@@ -102,8 +103,8 @@ where
         }
     }
 
-    for i in 0..check_to {
-        assert_eq!(stats[i], 1, "stats[{i}] = {}", stats[i]);
+    for (i, item) in stats.iter().enumerate().take(check_to) {
+        assert_eq!(*item, 1, "stats[{}] = {item}", i);
     }
 }
 
@@ -123,8 +124,8 @@ where
         for _ in 0..N {
             let popped = consumer.pop_many(&mut slice);
 
-            for i in 0..popped {
-                let res = count.fetch_add(unsafe { slice[i].assume_init() }, Ordering::Relaxed);
+            for item in slice.iter().take(popped) {
+                let res = count.fetch_add(unsafe { item.assume_init() }, Ordering::Relaxed);
 
                 if res == RES {
                     break;
@@ -147,8 +148,8 @@ where
 
     let mut slice = [0; BATCH_SIZE];
     for i in 0..N / BATCH_SIZE {
-        for j in 0..BATCH_SIZE {
-            slice[j] = i * BATCH_SIZE + j;
+        for (j, item) in slice.iter_mut().enumerate().take(BATCH_SIZE) {
+            *item = i * BATCH_SIZE + j;
         }
 
         let backoff = Backoff::new();

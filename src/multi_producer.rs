@@ -1,4 +1,4 @@
-//! This module provides the [`MultiProducer`], the [`MultiProducerSpawner`], 
+//! This module provides the [`MultiProducer`], the [`MultiProducerSpawner`],
 //! the [`MultiLockFreeProducer`] and the [`MultiLockFreeProducerSpawner`] traits.
 
 use crate::producer::LockFreeProducer;

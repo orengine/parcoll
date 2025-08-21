@@ -1,5 +1,6 @@
 use crate::backoff::Backoff;
 use crate::multi_consumer::MultiConsumer;
+use crate::single_producer::SingleProducer;
 use crate::spmc::{
     new_bounded, new_cache_padded_bounded, new_cache_padded_unbounded, new_unbounded,
 };
@@ -10,7 +11,6 @@ use std::mem::MaybeUninit;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread::spawn;
-use crate::single_producer::SingleProducer;
 
 static RAND: AtomicUsize = AtomicUsize::new(4);
 
@@ -19,7 +19,7 @@ where
     Producer: ProducerExt<usize> + Send + 'static + SPMCProducer<usize>,
     Consumer: ConsumerExt<usize> + MultiConsumer<usize> + Send + 'static,
 {
-    const N: usize = 1_000_000 ;
+    const N: usize = 1_000_000;
     const CHECK_TO: usize = if cfg!(feature = "always_steal") {
         N
     } else {
@@ -44,7 +44,7 @@ where
 
         'outer: loop {
             for _ in 0..RAND.fetch_add(1, Ordering::Relaxed) % 10 {
-                while let Err(_) = producer.maybe_push(i) {}
+                while producer.maybe_push(i).is_err() {}
 
                 i += 1;
 
@@ -66,39 +66,33 @@ where
     // Stealer threads.
     //
     // Repeatedly steal a random number of items.
-    let steal_periodically =
-        move |consumer: &Consumer, counter: Arc<AtomicUsize>| -> Vec<usize> {
-            let mut stats = vec![0; N];
-            let (mut dest_producer, _) = creator();
+    let steal_periodically = move |consumer: &Consumer, counter: Arc<AtomicUsize>| -> Vec<usize> {
+        let mut stats = vec![0; N];
+        let (dest_producer, _) = creator();
 
-            loop {
-                consumer.steal_into(&mut dest_producer);
+        loop {
+            consumer.steal_into(&dest_producer);
 
-                while let Some(i) = dest_producer.pop() {
-                    stats[i] += 1;
-                    counter.fetch_add(1, Ordering::Relaxed);
-                }
-
-                let count = counter.load(Ordering::Relaxed);
-
-                if count == N || !cfg!(feature = "always_steal") && count > CHECK_TO {
-                    break;
-                }
-
-                assert!(count < N);
+            while let Some(i) = dest_producer.pop() {
+                stats[i] += 1;
+                counter.fetch_add(1, Ordering::Relaxed);
             }
 
-            stats
-        };
+            let count = counter.load(Ordering::Relaxed);
+
+            if count == N || !cfg!(feature = "always_steal") && count > CHECK_TO {
+                break;
+            }
+
+            assert!(count < N);
+        }
+
+        stats
+    };
 
     let t1 = spawn(move || steal_periodically(&consumer1, counter1));
     let t2 = spawn(move || steal_periodically(&consumer2, counter2));
-    let mut stats = Vec::new();
-
-    stats.push(t0.join().unwrap());
-    stats.push(t1.join().unwrap());
-    stats.push(t2.join().unwrap());
-
+    let mut stats = vec![t0.join().unwrap(), t1.join().unwrap(), t2.join().unwrap()];
     let check_to = if cfg!(feature = "always_steal") {
         N
     } else {
@@ -113,8 +107,8 @@ where
 
         while delta > 0 {
             let popped = consumer.pop_many(slice.as_mut_slice());
-            for i in 0..popped {
-                stats[0][unsafe { slice[i].assume_init() }] += 1;
+            for item in slice.iter().take(popped) {
+                stats[0][unsafe { item.assume_init() }] += 1;
                 delta -= 1;
             }
         }
@@ -123,11 +117,11 @@ where
     for i in 0..check_to {
         let mut count = 0;
 
-        for j in 0..stats.len() {
-            count += stats[j][i];
+        for item in &stats {
+            count += item[i];
         }
 
-        assert_eq!(count, 1, "stats[{i}] = {}", count);
+        assert_eq!(count, 1, "stats[{i}] = {count}");
     }
 }
 
@@ -147,8 +141,8 @@ where
         for _ in 0..N {
             let popped = consumer.pop_many(&mut slice);
 
-            for i in 0..popped {
-                let res = count.fetch_add(unsafe { slice[i].assume_init() }, Ordering::Relaxed);
+            for item in slice.iter().take(popped) {
+                let res = count.fetch_add(unsafe { item.assume_init() }, Ordering::Relaxed);
 
                 if res == RES {
                     break;
@@ -165,7 +159,7 @@ where
 
     let (producer, consumer) = creator();
     let consumer1 = consumer.clone();
-    let consumer2 = consumer.clone();
+    let consumer2 = consumer;
     let count = Arc::new(AtomicUsize::new(0));
     let count1 = count.clone();
     let count2 = count.clone();
@@ -175,8 +169,8 @@ where
 
     let mut slice = [0; BATCH_SIZE];
     for i in 0..N / BATCH_SIZE {
-        for j in 0..BATCH_SIZE {
-            slice[j] = i * BATCH_SIZE + j;
+        for (j, item) in slice.iter_mut().enumerate().take(BATCH_SIZE) {
+            *item = i * BATCH_SIZE + j;
         }
 
         let backoff = Backoff::new();

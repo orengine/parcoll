@@ -1,11 +1,11 @@
 use crate::backoff::Backoff;
+use crate::mpmc::{new_bounded, new_cache_padded_bounded};
 use crate::multi_consumer::MultiConsumer;
+use crate::multi_producer::MultiProducer;
 use crate::test_lock::TEST_LOCK;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread::spawn;
-use crate::mpmc::{new_bounded, new_cache_padded_bounded};
-use crate::multi_producer::MultiProducer;
 
 fn test_mpmc_pop_push<Producer, Consumer>(creator: fn() -> (Producer, Consumer))
 where
@@ -44,9 +44,9 @@ where
                         received.fetch_add(value, Ordering::Relaxed);
 
                         break;
-                    } else {
-                        backoff.snooze();
                     }
+
+                    backoff.snooze();
                 }
             }
         }));
@@ -56,7 +56,10 @@ where
         handle.join().unwrap();
     }
 
-    assert_eq!(N * PAR_MULTIPLIER * (1 + N) / 2, received.load(Ordering::Relaxed));
+    assert_eq!(
+        N * PAR_MULTIPLIER * (1 + N) / 2,
+        received.load(Ordering::Relaxed)
+    );
 }
 
 #[test]

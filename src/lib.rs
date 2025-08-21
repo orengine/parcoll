@@ -67,7 +67,10 @@
 #![warn(clippy::pedantic)]
 #![warn(clippy::nursery)]
 #![warn(clippy::cargo)]
-#![allow(clippy::multiple_crate_versions, reason = "They were set by dev-dependencies")]
+#![allow(
+    clippy::multiple_crate_versions,
+    reason = "They were set by dev-dependencies"
+)]
 #![allow(async_fn_in_trait, reason = "It improves readability.")]
 #![allow(
     clippy::missing_const_for_fn,

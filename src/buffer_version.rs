@@ -12,7 +12,10 @@ pub(crate) fn pack_version_and_tail(version: u32, tail: u32) -> u64 {
 
 /// Unpacks the version and the tail from a single 64-bit value.
 #[inline(always)]
-#[allow(clippy::cast_possible_truncation, reason = "u64 can be divided into two u32")]
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "u64 can be divided into two u32"
+)]
 pub(crate) fn unpack_version_and_tail(value: u64) -> (u32, u32) {
     ((value >> 32) as u32, value as u32)
 }
@@ -83,7 +86,10 @@ impl<T> Version<T> {
 
     /// Returns a physical index of the given logical index.
     #[inline(always)]
-    #[allow(clippy::cast_possible_truncation, reason = "It is not allowed to have more than u32::MAX elements")]
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "It is not allowed to have more than u32::MAX elements"
+    )]
     pub(crate) fn physical_index(&self, logical_index: u32) -> u32 {
         #[cfg(feature = "unbounded_slices_always_pow2")]
         {
@@ -122,7 +128,10 @@ pub(crate) struct CachedVersion<T> {
 
 impl<T> CachedVersion<T> {
     /// Returns a cached version from the given `arc` version.
-    #[allow(clippy::cast_possible_truncation, reason = "It is not allowed to have more than u32::MAX elements")]
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "It is not allowed to have more than u32::MAX elements"
+    )]
     pub(crate) fn from_arc_version(arc: LightArc<Version<T>>) -> Self {
         Self {
             ptr: arc.ptr,

@@ -2,10 +2,10 @@
 use crate::batch_receiver::{BatchReceiver, LockFreeBatchReceiver, LockFreePushBatchErr};
 use crate::hints::{assert_hint, unlikely};
 use crate::loom_bindings::sync::Mutex;
+use crate::single_producer::SingleProducer;
 use crate::LightArc;
 use std::ptr::slice_from_raw_parts;
 use std::{mem, ptr};
-use crate::single_producer::SingleProducer;
 
 /// A queue that uses a vector to store the elements.
 pub(crate) struct VecQueue<T> {
@@ -431,8 +431,13 @@ mod tests {
                 .collect::<Vec<_>>();
             let one_more_value = i * BATCH_SIZE + BATCH_SIZE - 1;
 
-            let _ =
-                unsafe { global_queue.push_many_and_one(&slice[..2], &slice[2..], one_more_value) };
+            unsafe {
+                global_queue.push_many_and_one(
+                    &slice[..2],
+                    &slice[2..],
+                    one_more_value
+                );
+            };
         }
 
         for i in 0..N / BATCH_SIZE {

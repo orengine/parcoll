@@ -1,5 +1,5 @@
-use crate::LockFreePushManyErr;
 use crate::producer::{LockFreeProducer, Producer};
+use crate::LockFreePushManyErr;
 
 /// A producer of a single-producer queue.
 ///
@@ -24,7 +24,7 @@ pub trait SingleProducer<T>: Producer<T> {
     ///
     /// If the `T` is not `Copy`, the caller must [`forget`](core::mem::forget) the provided slice.
     unsafe fn maybe_push_many(&self, slice: &[T]) -> Result<(), ()>;
-    
+
     /// Copies values, calls the provided function and commits the values if the function returns `true`.
     /// It returns an error if the function returns an error and doesn't commit the values
     /// (caller must ensure that their destructors are called).

@@ -1,18 +1,25 @@
 //! This module provides a multi-producer, multi-consumer bounded queue. Read more in
 //! [`new_bounded`].
-#![allow(clippy::cast_possible_truncation, reason = "LongNumber is always at least usize")]
+#![allow(
+    clippy::cast_possible_truncation,
+    reason = "LongNumber is always at least usize"
+)]
 use crate::backoff::Backoff;
-use crate::number_types::{CachePaddedLongAtomic, LongAtomic, LongNumber, NotCachePaddedLongAtomic};
-use crate::{Consumer, LockFreeConsumer, LockFreePopErr, LockFreeProducer, LockFreePushErr, Producer};
+use crate::hints::unlikely;
+use crate::light_arc::LightArc;
+use crate::number_types::{
+    CachePaddedLongAtomic, LongAtomic, LongNumber, NotCachePaddedLongAtomic,
+};
+use crate::single_producer::{SingleLockFreeProducer, SingleProducer};
+use crate::{
+    Consumer, LockFreeConsumer, LockFreePopErr, LockFreeProducer, LockFreePushErr, Producer,
+};
 use std::cell::UnsafeCell;
+use std::marker::PhantomData;
 use std::mem::MaybeUninit;
 use std::ops::Deref;
 use std::sync::atomic::Ordering;
 use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
-use crate::hints::unlikely;
-use crate::light_arc::LightArc;
-use std::marker::PhantomData;
-use crate::single_producer::{SingleLockFreeProducer, SingleProducer};
 
 // Implementation notes for an MPMC (multi-producer, multi-consumer) bounded queue.
 //
@@ -232,7 +239,8 @@ where
     }
 }
 
-impl<T, const CAPACITY: usize, AtomicWrapper> Default for MPMCBoundedQueue<T, CAPACITY, AtomicWrapper>
+impl<T, const CAPACITY: usize, AtomicWrapper> Default
+    for MPMCBoundedQueue<T, CAPACITY, AtomicWrapper>
 where
     AtomicWrapper: Deref<Target = LongAtomic> + Default,
 {
@@ -241,7 +249,8 @@ where
     }
 }
 
-impl<T, const CAPACITY: usize, AtomicWrapper> Producer<T> for MPMCBoundedQueue<T, CAPACITY, AtomicWrapper>
+impl<T, const CAPACITY: usize, AtomicWrapper> Producer<T>
+    for MPMCBoundedQueue<T, CAPACITY, AtomicWrapper>
 where
     AtomicWrapper: Deref<Target = LongAtomic> + Default,
 {
@@ -288,10 +297,9 @@ where
                 // Let the compiler or PU to cache it into the registers
                 // and use in inlined functions
                 let new_tail = tail.wrapping_add(1);
-                let cas_result =
-                    self
-                        .tail
-                        .compare_exchange_weak(tail, new_tail, Relaxed, Relaxed);
+                let cas_result = self
+                    .tail
+                    .compare_exchange_weak(tail, new_tail, Relaxed, Relaxed);
 
                 match cas_result {
                     Ok(_) => {
@@ -326,7 +334,8 @@ where
     }
 }
 
-impl<T, const CAPACITY: usize, AtomicWrapper> LockFreeProducer<T> for MPMCBoundedQueue<T, CAPACITY, AtomicWrapper>
+impl<T, const CAPACITY: usize, AtomicWrapper> LockFreeProducer<T>
+    for MPMCBoundedQueue<T, CAPACITY, AtomicWrapper>
 where
     AtomicWrapper: Deref<Target = LongAtomic> + Default,
 {
@@ -357,17 +366,15 @@ macro_rules! generate_pop_body {
             let new_head = head.wrapping_add(1);
 
             if State::is_slot_occupied(head, state) {
-                let cas_result =
-                    $self
-                        .head
-                        .compare_exchange_weak(head, new_head, Relaxed, Relaxed);
+                let cas_result = $self
+                    .head
+                    .compare_exchange_weak(head, new_head, Relaxed, Relaxed);
 
                 match cas_result {
                     Ok(_) => {
                         let $success_value_ident = unsafe { slot.read_value() };
 
-                        slot
-                            .state()
+                        slot.state()
                             .mark_as_free(head, CAPACITY as LongNumber, Release);
 
                         $on_success_value
@@ -391,7 +398,8 @@ macro_rules! generate_pop_body {
     }};
 }
 
-impl<T, const CAPACITY: usize, AtomicWrapper> Consumer<T> for MPMCBoundedQueue<T, CAPACITY, AtomicWrapper>
+impl<T, const CAPACITY: usize, AtomicWrapper> Consumer<T>
+    for MPMCBoundedQueue<T, CAPACITY, AtomicWrapper>
 where
     AtomicWrapper: Deref<Target = LongAtomic> + Default,
 {
@@ -455,7 +463,8 @@ where
     }
 }
 
-impl<T, const CAPACITY: usize, AtomicWrapper> LockFreeConsumer<T> for MPMCBoundedQueue<T, CAPACITY, AtomicWrapper>
+impl<T, const CAPACITY: usize, AtomicWrapper> LockFreeConsumer<T>
+    for MPMCBoundedQueue<T, CAPACITY, AtomicWrapper>
 where
     AtomicWrapper: Deref<Target = LongAtomic> + Default,
 {
@@ -532,9 +541,12 @@ where
 
         while head != tail {
             unsafe {
-                self.slots.as_mut_ptr().add(head as usize % CAPACITY).drop_in_place();
+                self.slots
+                    .as_mut_ptr()
+                    .add(head as usize % CAPACITY)
+                    .drop_in_place();
             }
-            
+
             head += 1;
         }
     }
@@ -576,14 +588,18 @@ macro_rules! generate_mpmc_producer_and_consumer {
         impl<T: Send, const CAPACITY: usize> $crate::LockFreeProducer<T>
             for $producer_name<T, CAPACITY>
         {
-            fn lock_free_maybe_push(&self, value: T) -> Result<(), $crate::lock_free_errors::LockFreePushErr<T>> {
+            fn lock_free_maybe_push(
+                &self,
+                value: T,
+            ) -> Result<(), $crate::lock_free_errors::LockFreePushErr<T>> {
                 $crate::LockFreeProducer::lock_free_maybe_push(&*self.inner, value)
             }
         }
 
         impl<T: Send, const CAPACITY: usize> $crate::multi_producer::MultiProducer<T>
             for $producer_name<T, CAPACITY>
-        {}
+        {
+        }
 
         impl<T: Send, const CAPACITY: usize> $crate::multi_producer::MultiLockFreeProducer<T>
             for $producer_name<T, CAPACITY>
@@ -608,9 +624,7 @@ macro_rules! generate_mpmc_producer_and_consumer {
         {
             type SpawnedLockFreeConsumer = $consumer_name<T, CAPACITY>;
 
-            fn spawn_multi_lock_free_consumer(
-                &self,
-            ) -> Self::SpawnedLockFreeConsumer {
+            fn spawn_multi_lock_free_consumer(&self) -> Self::SpawnedLockFreeConsumer {
                 $consumer_name {
                     inner: self.inner.clone(),
                     _non_sync: PhantomData,
@@ -719,9 +733,7 @@ macro_rules! generate_mpmc_producer_and_consumer {
         {
             type SpawnedLockFreeProducer = $producer_name<T, CAPACITY>;
 
-            fn spawn_multi_lock_free_producer(
-                &self,
-            ) -> Self::SpawnedLockFreeProducer {
+            fn spawn_multi_lock_free_producer(&self) -> Self::SpawnedLockFreeProducer {
                 $producer_name {
                     inner: self.inner.clone(),
                     _non_sync: PhantomData,
@@ -776,10 +788,8 @@ generate_mpmc_producer_and_consumer!(MPMCProducer, MPMCConsumer);
 /// assert_eq!(unsafe { slice[0].assume_init() }, 1);
 /// assert_eq!(unsafe { slice[1].assume_init() }, 2);
 /// ```
-pub fn new_bounded<T: Send, const CAPACITY: usize>() -> (
-    MPMCProducer<T, CAPACITY>,
-    MPMCConsumer<T, CAPACITY>
-) {
+pub fn new_bounded<T: Send, const CAPACITY: usize>(
+) -> (MPMCProducer<T, CAPACITY>, MPMCConsumer<T, CAPACITY>) {
     let queue = LightArc::new(MPMCBoundedQueue::new());
 
     (
@@ -852,9 +862,9 @@ pub fn new_cache_padded_bounded<T: Send, const CAPACITY: usize>() -> (
 
 #[cfg(test)]
 mod tests {
-    use std::collections::VecDeque;
-    use crate::{spsc, Consumer, LockFreeConsumer, LockFreeProducer, Producer};
     use super::*;
+    use crate::{spsc, Consumer, LockFreeConsumer, LockFreeProducer, Producer};
+    use std::collections::VecDeque;
 
     const CAPACITY: usize = 16;
 
@@ -862,21 +872,15 @@ mod tests {
     fn test_mpmc_bounded_seq_insertions() {
         let (producer, consumer) = new_bounded::<_, CAPACITY>();
 
-        for i in 0..CAPACITY  {
+        for i in 0..CAPACITY {
             producer.maybe_push(i).unwrap();
         }
 
         assert!(producer.maybe_push(0).is_err());
 
-        assert_eq!(
-            producer.len(),
-            CAPACITY
-        );
+        assert_eq!(producer.len(), CAPACITY);
 
-        assert_eq!(
-            consumer.len(),
-            CAPACITY
-        );
+        assert_eq!(consumer.len(), CAPACITY);
 
         for i in 0..producer.len() {
             assert_eq!(consumer.pop(), Some(i));
@@ -908,7 +912,7 @@ mod tests {
 
         let mut count = 0;
 
-        while let Some(_) = consumer.pop() {
+        while consumer.pop().is_some() {
             count += 1;
         }
 
@@ -919,21 +923,15 @@ mod tests {
     fn test_mpmc_lock_free_bounded_seq_insertions() {
         let (producer, consumer) = new_bounded::<_, CAPACITY>();
 
-        for i in 0..CAPACITY  {
+        for i in 0..CAPACITY {
             producer.lock_free_maybe_push(i).unwrap();
         }
 
         assert!(producer.lock_free_maybe_push(0).is_err());
 
-        assert_eq!(
-            producer.len(),
-            CAPACITY
-        );
+        assert_eq!(producer.len(), CAPACITY);
 
-        assert_eq!(
-            consumer.len(),
-            CAPACITY
-        );
+        assert_eq!(consumer.len(), CAPACITY);
 
         for i in 0..producer.len() {
             assert_eq!(consumer.lock_free_pop().unwrap(), i);
@@ -965,7 +963,7 @@ mod tests {
 
         let mut count = 0;
 
-        while let Ok(_) = consumer.lock_free_pop() {
+        while consumer.lock_free_pop().is_ok() {
             count += 1;
         }
 
