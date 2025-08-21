@@ -20,11 +20,7 @@ where
     Consumer: ConsumerExt<usize> + MultiConsumer<usize> + Send + 'static,
 {
     const N: usize = 1_000_000;
-    const CHECK_TO: usize = if cfg!(feature = "always_steal") {
-        N
-    } else {
-        N - 10
-    };
+    const CHECK_TO: usize = N - 10;
 
     let counter = Arc::new(AtomicUsize::new(0));
     let (producer, consumer) = creator();
@@ -96,7 +92,7 @@ where
 
             let count = counter.load(Ordering::Relaxed);
 
-            if count == N || !cfg!(feature = "always_steal") && count > CHECK_TO {
+            if count > CHECK_TO {
                 break;
             }
 
@@ -109,14 +105,9 @@ where
     let t1 = spawn(move || steal_periodically(&consumer1, counter1));
     let t2 = spawn(move || steal_periodically(&consumer2, counter2));
     let mut stats = vec![t0.join().unwrap(), t1.join().unwrap(), t2.join().unwrap()];
-    let check_to = if cfg!(feature = "always_steal") {
-        N
-    } else {
-        CHECK_TO
-    };
 
-    if consumer.len() + check_to > N {
-        let mut delta = consumer.len() + check_to - N;
+    if consumer.len() + CHECK_TO > N {
+        let mut delta = consumer.len() + CHECK_TO - N;
         assert!(delta < 100);
 
         let mut slice = [const { MaybeUninit::uninit() }; 100];
@@ -130,7 +121,7 @@ where
         }
     }
 
-    for i in 0..check_to {
+    for i in 0..CHECK_TO {
         let mut count = 0;
 
         for item in &stats {

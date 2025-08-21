@@ -19,7 +19,7 @@ jobs:
       - name: Clippy (x86)
         run: cargo clippy --all-targets --all-features -- -D warnings
       - name: Test (x86)
-        run: cargo test --all-targets --all-features
+        run: cargo test --all-targets --all-features -- --test-threads=1
 
   arm:
     name: ️‍ ARM64 (ubuntu-24.04-arm)
@@ -31,4 +31,4 @@ jobs:
         with:
           toolchain: 1.83.0
       - name: Test (ARM)
-        run: cargo test --all-targets --all-features
+        run: cargo test --all-targets --all-features -- --test-threads=1

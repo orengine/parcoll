@@ -20,11 +20,7 @@ where
     Consumer: ConsumerExt<usize> + Send + 'static,
 {
     const N: usize = 1_000_000;
-    const CHECK_TO: usize = if cfg!(feature = "always_steal") {
-        N
-    } else {
-        N - 10
-    };
+    const CHECK_TO: usize = N - 10;
 
     let (producer, consumer) = creator();
 
@@ -67,7 +63,7 @@ where
 
             let count = counter.load(Ordering::Relaxed);
 
-            if count == N || !cfg!(feature = "always_steal") && count > CHECK_TO {
+            if count > CHECK_TO {
                 break;
             }
 
@@ -82,14 +78,8 @@ where
 
     t0.join().unwrap();
 
-    let check_to = if cfg!(feature = "always_steal") {
-        N
-    } else {
-        CHECK_TO
-    };
-
-    if consumer.len() + check_to > N {
-        let mut delta = consumer.len() + check_to - N;
+    if consumer.len() + CHECK_TO > N {
+        let mut delta = consumer.len() + CHECK_TO - N;
         assert!(delta < 100);
 
         let mut slice = [const { MaybeUninit::uninit() }; 100];
@@ -103,7 +93,7 @@ where
         }
     }
 
-    for (i, item) in stats.iter().enumerate().take(check_to) {
+    for (i, item) in stats.iter().enumerate().take(CHECK_TO) {
         assert_eq!(*item, 1, "stats[{}] = {item}", i);
     }
 }
