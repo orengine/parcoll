@@ -1,3 +1,5 @@
+pub mod generic_spmc_queue;
+
 use crate::generic_spmc_queue::{
     CrossbeamFifoWorker, CrossbeamLifoWorker, GenericStealer, GenericWorker,
 };
@@ -6,8 +8,6 @@ use parcoll::{mpmc, spsc, LightArc};
 use std::time::Instant;
 use parcoll::single_consumer::SingleConsumer;
 use parcoll::single_producer::SingleProducer;
-
-pub(crate) mod generic_spmc_queue;
 
 // Single-threaded benchmark.
 //

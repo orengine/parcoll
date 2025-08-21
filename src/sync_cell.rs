@@ -118,10 +118,12 @@ impl<T> SyncCell<T> for std::sync::Mutex<T> {
 }
 
 /// A mocking implementation of [`LockFreeSyncCell`]. But it is not lock-free.
+#[cfg(test)]
 pub(crate) struct LockFreeSyncCellMock<T> {
     inner: NaiveRWLock<T>,
 }
 
+#[cfg(test)]
 impl<T> SyncCell<T> for LockFreeSyncCellMock<T> {
     fn from_value(value: T) -> Self {
         Self {
@@ -142,4 +144,5 @@ impl<T> SyncCell<T> for LockFreeSyncCellMock<T> {
     }
 }
 
+#[cfg(test)]
 impl<T> LockFreeSyncCell<T> for LockFreeSyncCellMock<T> {}

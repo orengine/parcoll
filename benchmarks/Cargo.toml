@@ -1,0 +1,16 @@
+[package]
+name = "benchmarks"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+criterion = "0.7.0"
+crossbeam-queue = "0.3.12"
+crossbeam-deque = "0.8.6"
+st3 = "0.4.1"
+parcoll = { path = "../../parcoll", features = ["always_steal"] }
+
+[[bench]]
+name = "benchmark"
+path = "src/main.rs"
+harness = false

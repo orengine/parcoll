@@ -1,4 +1,4 @@
-//! This module provides implementations of a single-producer multi-consumer queues.
+//! This module provides implementations of single-producer multi-consumer queues.
 //!
 //! It contains two implementations:
 //!
@@ -10,9 +10,7 @@
 mod const_bounded;
 #[cfg(test)]
 mod tests;
-#[cfg(not(feature = "disable_unbounded"))]
 mod unbounded;
 
 pub use const_bounded::*;
-#[cfg(not(feature = "disable_unbounded"))]
 pub use unbounded::*;
