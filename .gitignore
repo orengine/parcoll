@@ -1,1 +1,6 @@
 /target
+/.idea
+/.vscode
+/benchmarks/target
+/benchmarks/Cargo.lock
+/Cargo.lock
