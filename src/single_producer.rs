@@ -1,9 +1,30 @@
+use crate::LockFreePushManyErr;
 use crate::producer::{LockFreeProducer, Producer};
 
 /// A producer of a single-producer queue.
 ///
 /// Because it is the only producer, it can push values very quickly.
 pub trait SingleProducer<T>: Producer<T> {
+    /// Pushes multiple values into the queue.
+    /// It accepts two slices to allow using it for ring-based queues.
+    ///
+    /// # Safety
+    ///
+    /// If the `T` is not `Copy`, the caller must [`forget`](core::mem::forget) the both slices;
+    /// It should be called only when the `Producer` has space for the values.
+    /// It doesn't check if it has space and expected that the caller does.
+    unsafe fn push_many_unchecked(&self, first: &[T], last: &[T]);
+
+    /// Pushes multiple values into the queue or returns an error if
+    /// the queue doesn't have enough space.
+    ///
+    /// It may be non-lock-free.
+    ///
+    /// # Safety
+    ///
+    /// If the `T` is not `Copy`, the caller must [`forget`](core::mem::forget) the provided slice.
+    unsafe fn maybe_push_many(&self, slice: &[T]) -> Result<(), ()>;
+    
     /// Copies values, calls the provided function and commits the values if the function returns `true`.
     /// It returns an error if the function returns an error and doesn't commit the values
     /// (caller must ensure that their destructors are called).
@@ -43,4 +64,16 @@ pub trait SingleProducer<T>: Producer<T> {
 /// A lock-free producer of a single-producer queue.
 ///
 /// Because it is the only producer, it can push values very quickly.
-pub trait SingleLockFreeProducer<T>: SingleProducer<T> + LockFreeProducer<T> {}
+pub trait SingleLockFreeProducer<T>: SingleProducer<T> + LockFreeProducer<T> {
+    /// Pushes multiple values into the queue or returns
+    /// an <code>Err([LockFreePushManyErr])</code>.
+    ///
+    /// It is lock-free.
+    /// If you can lock, you can look at the [`SingleProducer::maybe_push_many`] method
+    /// because if it is implemented not as lock-free, it should have better performance.
+    ///
+    /// # Safety
+    ///
+    /// If the `T` is not `Copy`, the caller must [`forget`](core::mem::forget) the provided slice.
+    unsafe fn lock_free_maybe_push_many(&self, slice: &[T]) -> Result<(), LockFreePushManyErr>;
+}

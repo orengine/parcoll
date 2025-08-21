@@ -10,40 +10,16 @@ use std::mem::MaybeUninit;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread::spawn;
-// Note: test values are boxed in Miri tests so that destructors called on freed
-// values and forgotten destructors can be detected.
-
-#[cfg(miri)]
-type TestValue<T> = Box<T>;
-
-#[cfg(not(miri))]
-#[derive(Debug, Default, PartialEq, Copy, Clone)]
-struct TestValue<T>(T);
-
-#[cfg(not(miri))]
-impl<T> TestValue<T> {
-    fn new(val: T) -> Self {
-        Self(val)
-    }
-}
-
-#[cfg(not(miri))]
-impl<T> std::ops::Deref for TestValue<T> {
-    type Target = T;
-
-    fn deref(&self) -> &T {
-        &self.0
-    }
-}
+use crate::single_producer::SingleProducer;
 
 static RAND: AtomicUsize = AtomicUsize::new(4);
 
 fn test_spmc_multi_threaded_steal<Producer, Consumer>(creator: fn() -> (Producer, Consumer))
 where
-    Producer: ProducerExt<TestValue<usize>> + Send + 'static + SPMCProducer<TestValue<usize>>,
-    Consumer: ConsumerExt<TestValue<usize>> + MultiConsumer<TestValue<usize>> + Send + 'static,
+    Producer: ProducerExt<usize> + Send + 'static + SPMCProducer<usize>,
+    Consumer: ConsumerExt<usize> + MultiConsumer<usize> + Send + 'static,
 {
-    const N: usize = if cfg!(miri) { 200 } else { 1_000_000 };
+    const N: usize = 1_000_000 ;
     const CHECK_TO: usize = if cfg!(feature = "always_steal") {
         N
     } else {
@@ -54,9 +30,9 @@ where
     let (producer, consumer) = creator();
 
     let counter0 = counter.clone();
-    let mut consumer1 = consumer.clone();
+    let consumer1 = consumer.clone();
     let counter1 = counter.clone();
-    let mut consumer2 = consumer.clone();
+    let consumer2 = consumer.clone();
     let counter2 = counter;
 
     // Producer thread.
@@ -68,7 +44,7 @@ where
 
         'outer: loop {
             for _ in 0..RAND.fetch_add(1, Ordering::Relaxed) % 10 {
-                while let Err(_) = producer.maybe_push(TestValue::new(i)) {}
+                while let Err(_) = producer.maybe_push(i) {}
 
                 i += 1;
 
@@ -78,7 +54,7 @@ where
             }
 
             if let Some(j) = producer.pop() {
-                stats[*j] += 1;
+                stats[j] += 1;
 
                 counter0.fetch_add(1, Ordering::Relaxed);
             }
@@ -91,7 +67,7 @@ where
     //
     // Repeatedly steal a random number of items.
     let steal_periodically =
-        move |consumer: &mut Consumer, counter: Arc<AtomicUsize>| -> Vec<usize> {
+        move |consumer: &Consumer, counter: Arc<AtomicUsize>| -> Vec<usize> {
             let mut stats = vec![0; N];
             let (mut dest_producer, _) = creator();
 
@@ -99,7 +75,7 @@ where
                 consumer.steal_into(&mut dest_producer);
 
                 while let Some(i) = dest_producer.pop() {
-                    stats[*i] += 1;
+                    stats[i] += 1;
                     counter.fetch_add(1, Ordering::Relaxed);
                 }
 
@@ -115,8 +91,8 @@ where
             stats
         };
 
-    let t1 = spawn(move || steal_periodically(&mut consumer1, counter1));
-    let t2 = spawn(move || steal_periodically(&mut consumer2, counter2));
+    let t1 = spawn(move || steal_periodically(&consumer1, counter1));
+    let t2 = spawn(move || steal_periodically(&consumer2, counter2));
     let mut stats = Vec::new();
 
     stats.push(t0.join().unwrap());
@@ -138,7 +114,7 @@ where
         while delta > 0 {
             let popped = consumer.pop_many(slice.as_mut_slice());
             for i in 0..popped {
-                stats[0][unsafe { *slice[i].assume_init() }] += 1;
+                stats[0][unsafe { slice[i].assume_init() }] += 1;
                 delta -= 1;
             }
         }
@@ -157,22 +133,22 @@ where
 
 fn test_spmc_multi_threaded_pop_many<Producer, Consumer>(creator: fn() -> (Producer, Consumer))
 where
-    Producer: ProducerExt<TestValue<usize>> + Send + 'static,
-    Consumer: ConsumerExt<TestValue<usize>> + MultiConsumer<TestValue<usize>> + Send + 'static,
+    Producer: SingleProducer<usize> + Send + 'static,
+    Consumer: ConsumerExt<usize> + MultiConsumer<usize> + Send + 'static,
 {
-    const N: usize = if cfg!(miri) { 200 } else { 1_000_000 };
+    const N: usize = 1_000_000;
     const BATCH_SIZE: usize = 5;
     const RES: usize = (N - 1) * N / 2;
 
-    let consumer_pop_many = |consumer: &mut Consumer, count: &AtomicUsize| {
-        let mut slice = [MaybeUninit::uninit(); BATCH_SIZE];
+    let consumer_pop_many = |consumer: &Consumer, count: &AtomicUsize| {
+        let mut slice = [const { MaybeUninit::uninit() }; BATCH_SIZE];
         let backoff = Backoff::new();
 
         for _ in 0..N {
             let popped = consumer.pop_many(&mut slice);
 
             for i in 0..popped {
-                let res = count.fetch_add(unsafe { *slice[i].assume_init() }, Ordering::Relaxed);
+                let res = count.fetch_add(unsafe { slice[i].assume_init() }, Ordering::Relaxed);
 
                 if res == RES {
                     break;
@@ -188,19 +164,19 @@ where
     };
 
     let (producer, consumer) = creator();
-    let mut consumer1 = consumer.clone();
-    let mut consumer2 = consumer.clone();
+    let consumer1 = consumer.clone();
+    let consumer2 = consumer.clone();
     let count = Arc::new(AtomicUsize::new(0));
     let count1 = count.clone();
     let count2 = count.clone();
 
-    let t0 = spawn(move || consumer_pop_many(&mut consumer1, &count1));
-    let t1 = spawn(move || consumer_pop_many(&mut consumer2, &count2));
+    let t0 = spawn(move || consumer_pop_many(&consumer1, &count1));
+    let t1 = spawn(move || consumer_pop_many(&consumer2, &count2));
 
-    let mut slice = [TestValue(0); BATCH_SIZE];
+    let mut slice = [0; BATCH_SIZE];
     for i in 0..N / BATCH_SIZE {
         for j in 0..BATCH_SIZE {
-            slice[j] = TestValue(i * BATCH_SIZE + j);
+            slice[j] = i * BATCH_SIZE + j;
         }
 
         let backoff = Backoff::new();
@@ -220,11 +196,11 @@ where
 fn test_bounded_spmc_multi_threaded_steal() {
     let test_guard = TEST_LOCK.lock();
 
-    test_spmc_multi_threaded_steal(new_bounded::<TestValue<usize>, 256>);
+    test_spmc_multi_threaded_steal(new_bounded::<usize, 256>);
 
     println!("Non cache padded done, start cache padded");
 
-    test_spmc_multi_threaded_steal(new_cache_padded_bounded::<TestValue<usize>, 256>);
+    test_spmc_multi_threaded_steal(new_cache_padded_bounded::<usize, 256>);
 
     drop(test_guard);
 }
@@ -258,11 +234,11 @@ fn test_unbounded_spmc_multi_threaded_steal() {
 fn test_bounded_spmc_multi_threaded_pop_many() {
     let test_guard = TEST_LOCK.lock();
 
-    test_spmc_multi_threaded_pop_many(new_bounded::<TestValue<usize>, 256>);
+    test_spmc_multi_threaded_pop_many(new_bounded::<usize, 256>);
 
     println!("Non cache padded done, start cache padded");
 
-    test_spmc_multi_threaded_pop_many(new_cache_padded_bounded::<TestValue<usize>, 256>);
+    test_spmc_multi_threaded_pop_many(new_cache_padded_bounded::<usize, 256>);
 
     drop(test_guard);
 }

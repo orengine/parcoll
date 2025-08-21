@@ -92,7 +92,7 @@ pub trait LockFreeConsumer<T>: Consumer<T> {
     /// because if it is implemented not as lock-free, it should have better performance.
     fn lock_free_pop_many(&self, dst: &mut [MaybeUninit<T>]) -> (usize, bool);
 
-    /// Pops a value from the queue. On failure, returns `Err(`[`LockFreePopErr`]`)`.
+    /// Pops a value from the queue. On failure, returns <code>Err([`LockFreePopErr`])</code>.
     ///
     /// It is lock-free.
     /// If you can lock, you can look at the [`Consumer::pop`] method

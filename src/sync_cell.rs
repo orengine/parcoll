@@ -53,11 +53,11 @@ pub trait LockFreeSyncCell<T>: SyncCell<T> {}
 
 impl<T> SyncCell<T> for NaiveRWLock<T> {
     fn from_value(value: T) -> Self {
-        NaiveRWLock::new(value)
+        Self::new(value)
     }
 
     fn get_mut(&mut self) -> &mut T {
-        NaiveRWLock::get_mut(self)
+        Self::get_mut(self)
     }
 
     fn try_with<U>(&self, f: impl FnOnce(&T) -> U) -> Option<U> {
@@ -75,11 +75,11 @@ impl<T> SyncCell<T> for NaiveRWLock<T> {
 
 impl<T> SyncCell<T> for std::sync::RwLock<T> {
     fn from_value(value: T) -> Self {
-        std::sync::RwLock::new(value)
+        Self::new(value)
     }
 
     fn get_mut(&mut self) -> &mut T {
-        std::sync::RwLock::get_mut(self).unwrap()
+        Self::get_mut(self).unwrap()
     }
 
     fn try_with<U>(&self, f: impl FnOnce(&T) -> U) -> Option<U> {
@@ -97,11 +97,11 @@ impl<T> SyncCell<T> for std::sync::RwLock<T> {
 
 impl<T> SyncCell<T> for std::sync::Mutex<T> {
     fn from_value(value: T) -> Self {
-        std::sync::Mutex::new(value)
+        Self::new(value)
     }
 
     fn get_mut(&mut self) -> &mut T {
-        std::sync::Mutex::get_mut(self).unwrap()
+        Self::get_mut(self).unwrap()
     }
 
     fn try_with<U>(&self, f: impl FnOnce(&T) -> U) -> Option<U> {
@@ -124,7 +124,7 @@ pub(crate) struct LockFreeSyncCellMock<T> {
 
 impl<T> SyncCell<T> for LockFreeSyncCellMock<T> {
     fn from_value(value: T) -> Self {
-        LockFreeSyncCellMock {
+        Self {
             inner: NaiveRWLock::new(value),
         }
     }

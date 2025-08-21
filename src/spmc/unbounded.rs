@@ -182,12 +182,12 @@ where
     #[inline]
     unsafe fn producer_len(&self) -> usize {
         let tail = unsafe { self.unsync_load_tail() }; // only the producer can change tail
-        let head = self.head.load(SUSPICIOUS_RELAXED_ACQUIRE);
+        self.cached_head.set(self.head.load(SUSPICIOUS_RELAXED_ACQUIRE));
 
         // We can avoid checking the version
         // because the producer always has the latest version.
 
-        Self::len(head, tail)
+        Self::len(self.cached_head.get(), tail)
     }
 
     /// Returns the capacity of the queue.
@@ -540,7 +540,7 @@ where
     #[inline]
     unsafe fn producer_push(&self, value: T, version: &mut CachedVersion<T>) {
         let tail = unsafe { self.unsync_load_tail() }; // only the producer can change tail
-        let mut head = self.cached_head.get();
+        let head = self.cached_head.get();
 
         if unlikely(Self::len(head, tail) >= version.capacity()) {
             self.cached_head.set(self.head.load(SUSPICIOUS_RELAXED_ACQUIRE));
@@ -1043,8 +1043,20 @@ macro_rules! generate_spmc_producer_and_consumer {
 
                 Ok(())
             }
+        }
 
-            #[inline]
+        impl<T: Send, SC> $crate::LockFreeProducer<T> for $producer_name<T, SC>
+        where
+            SC: SyncCell<LightArc<Version<T>>> + LockFreeSyncCell<LightArc<Version<T>>>
+        {
+            fn lock_free_maybe_push(&self, value: T) -> Result<(), $crate::lock_free_errors::LockFreePushErr<T>> {
+                unsafe { self.inner.producer_push(value, self.cached_version()) };
+
+                Ok(())
+            }
+        }
+
+        impl<T: Send, SC: SyncCell<LightArc<Version<T>>>> $crate::single_producer::SingleProducer<T> for $producer_name<T, SC> {
             unsafe fn push_many_unchecked(&self, first: &[T], last: &[T]) {
                 unsafe {
                     self
@@ -1053,7 +1065,6 @@ macro_rules! generate_spmc_producer_and_consumer {
                 }
             }
 
-            #[inline]
             unsafe fn maybe_push_many(&self, slice: &[T]) -> Result<(), ()> {
                 unsafe {
                     self
@@ -1063,26 +1074,7 @@ macro_rules! generate_spmc_producer_and_consumer {
 
                 Ok(())
             }
-        }
-
-        impl<T: Send, SC> $crate::LockFreeProducer<T> for $producer_name<T, SC>
-        where
-            SC: SyncCell<LightArc<Version<T>>> + LockFreeSyncCell<LightArc<Version<T>>>
-        {
-            unsafe fn lock_free_maybe_push_many(&self, slice: &[T]) -> Result<(), $crate::lock_free_errors::LockFreePushManyErr> {
-                unsafe { self.inner.producer_push_many(slice, self.cached_version()) };
-
-                Ok(())
-            }
-
-            fn lock_free_maybe_push(&self, value: T) -> Result<(), $crate::lock_free_errors::LockFreePushErr<T>> {
-                unsafe { self.inner.producer_push(value, self.cached_version()) };
-
-                Ok(())
-            }
-        }
-
-        impl<T: Send, SC: SyncCell<LightArc<Version<T>>>> $crate::single_producer::SingleProducer<T> for $producer_name<T, SC> {
+            
             unsafe fn copy_and_commit_if<F, FSuccess, FError>(&self, right: &[T], left: &[T], f: F) -> Result<FSuccess, FError>
             where
                 F: FnOnce() -> Result<FSuccess, FError>
@@ -1094,7 +1086,13 @@ macro_rules! generate_spmc_producer_and_consumer {
         impl<T: Send, SC> $crate::single_producer::SingleLockFreeProducer<T> for $producer_name<T, SC>
         where
             SC: SyncCell<LightArc<Version<T>>> + LockFreeSyncCell<LightArc<Version<T>>>
-        {}
+        {
+            unsafe fn lock_free_maybe_push_many(&self, slice: &[T]) -> Result<(), $crate::lock_free_errors::LockFreePushManyErr> {
+                unsafe { self.inner.producer_push_many(slice, self.cached_version()) };
+
+                Ok(())
+            }
+        }
 
         impl<T: Send, SC> $crate::spmc_producer::SPMCProducer<T> for $producer_name<T, SC>
         where
@@ -1313,14 +1311,11 @@ generate_spmc_producer_and_consumer!(SPMCUnboundedProducer, SPMCUnboundedConsume
 /// Returns [`producer`](SPMCUnboundedProducer) and [`consumer`](SPMCUnboundedConsumer).
 ///
 /// The producer __should__ be only one while consumers can be cloned.
-/// If you want to use more than one producer, don't use this queue.
-///
-/// If you want to use only one consumer, look at the single-producer, single-consumer queue.
 ///
 /// # Unbounded queue vs. [`bounded queue`](crate::spmc::new_bounded).
 ///
 /// - [`maybe_push`](crate::Producer::maybe_push),
-///   [`maybe_push_many`](crate::Producer::maybe_push_many)
+///   [`maybe_push_many`](crate::single_producer::SingleProducer::maybe_push_many)
 ///   can return an error only for `bounded` queue.
 /// - [`push`](crate::spmc_producer::SPMCProducer::push),
 ///   [`push_many`](crate::spmc_producer::SPMCProducer::push_many)
@@ -1352,7 +1347,7 @@ generate_spmc_producer_and_consumer!(SPMCUnboundedProducer, SPMCUnboundedConsume
 /// use parcoll::buffer_version::Version;
 /// use parcoll::naive_rw_lock::NaiveRWLock;
 ///
-/// let (mut producer, mut consumer) = new_unbounded_with_sync_cell::<_, NaiveRWLock<LightArc<Version<_>>>>();
+/// let (producer, consumer) = new_unbounded_with_sync_cell::<_, NaiveRWLock<LightArc<Version<_>>>>();
 /// let consumer2 = consumer.clone(); // You can clone the consumer
 ///
 /// producer.maybe_push(1).unwrap();
@@ -1398,14 +1393,11 @@ generate_spmc_producer_and_consumer!(
 /// Returns [`producer`](SPMCUnboundedProducer) and [`consumer`](SPMCUnboundedConsumer).
 ///
 /// The producer __should__ be only one while consumers can be cloned.
-/// If you want to use more than one producer, don't use this queue.
-///
-/// If you want to use only one consumer, look at the single-producer, single-consumer queue.
 ///
 /// # Unbounded queue vs. [`bounded queue`](crate::spmc::new_bounded).
 ///
 /// - [`maybe_push`](crate::Producer::maybe_push),
-///   [`maybe_push_many`](crate::Producer::maybe_push_many)
+///   [`maybe_push_many`](crate::single_producer::SingleProducer::maybe_push_many)
 ///   can return an error only for `bounded` queue.
 /// - [`push`](crate::spmc_producer::SPMCProducer::push),
 ///   [`push_many`](crate::spmc_producer::SPMCProducer::push_many)
@@ -1437,7 +1429,7 @@ generate_spmc_producer_and_consumer!(
 /// use parcoll::buffer_version::Version;
 /// use parcoll::naive_rw_lock::NaiveRWLock;
 ///
-/// let (mut producer, mut consumer) = new_cache_padded_unbounded_with_sync_cell::<_, NaiveRWLock<LightArc<Version<_>>>>();
+/// let (producer, consumer) = new_cache_padded_unbounded_with_sync_cell::<_, NaiveRWLock<LightArc<Version<_>>>>();
 /// let consumer2 = consumer.clone(); // You can clone the consumer
 ///
 /// producer.maybe_push(1).unwrap();
@@ -1500,8 +1492,9 @@ mod tests {
     use crate::mutex_vec_queue::MutexVecQueue;
     use crate::spmc_producer::{SPMCLockFreeProducer, SPMCProducer};
     use crate::sync_cell::LockFreeSyncCellMock;
-    use crate::{Consumer, LockFreeConsumer, LockFreeProducer, Producer};
+    use crate::{Consumer, LockFreeConsumer, Producer};
     use std::collections::VecDeque;
+    use crate::single_producer::{SingleLockFreeProducer, SingleProducer};
 
     const N: usize = 16000;
     const BATCH_SIZE: usize = 10;
@@ -1545,7 +1538,7 @@ mod tests {
         let global_queue = MutexVecQueue::new();
         let mut stolen = VecDeque::new();
         let (producer1, consumer) = new_unbounded();
-        let (mut producer2, _) = new_unbounded();
+        let (producer2, _) = new_unbounded();
 
         producer2.reserve(512);
 
@@ -1554,7 +1547,7 @@ mod tests {
                 producer1.push(i, &global_queue);
             }
 
-            consumer.steal_into(&mut producer2);
+            consumer.steal_into(&producer2);
 
             while let Some(task) = producer2.pop() {
                 stolen.push_back(task);
@@ -1667,7 +1660,7 @@ mod tests {
         let mut stolen = VecDeque::new();
         let (producer1, consumer) =
             new_unbounded_with_sync_cell::<_, LockFreeSyncCellMock<LightArc<Version<usize>>>>();
-        let (mut producer2, _) =
+        let (producer2, _) =
             new_unbounded_with_sync_cell::<_, LockFreeSyncCellMock<LightArc<Version<usize>>>>();
 
         producer2.reserve(512);
@@ -1677,7 +1670,7 @@ mod tests {
                 producer1.lock_free_push(i, &global_queue).unwrap();
             }
 
-            assert!(!consumer.lock_free_steal_into(&mut producer2).1);
+            assert!(!consumer.lock_free_steal_into(&producer2).1);
 
             while let Ok(task) = producer2.lock_free_pop() {
                 stolen.push_back(task);

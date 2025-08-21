@@ -2,9 +2,10 @@
 use crate::batch_receiver::{BatchReceiver, LockFreeBatchReceiver, LockFreePushBatchErr};
 use crate::hints::{assert_hint, unlikely};
 use crate::loom_bindings::sync::Mutex;
-use crate::{LightArc, Producer};
+use crate::LightArc;
 use std::ptr::slice_from_raw_parts;
 use std::{mem, ptr};
+use crate::single_producer::SingleProducer;
 
 /// A queue that uses a vector to store the elements.
 pub(crate) struct VecQueue<T> {
@@ -183,10 +184,10 @@ impl<T> VecQueue<T> {
         self.tail = self.tail.wrapping_add(slice.len());
     }
 
-    /// Moves at most `limit` elements from the queue to the producer.
+    /// Moves at most `limit` elements from the queue to the [`single producer`](SingleProducer).
     pub(crate) fn move_batch_to_producer(
         &mut self,
-        producer: &mut impl Producer<T>,
+        producer: &impl SingleProducer<T>,
         mut limit: usize,
     ) {
         limit = self.len().min(limit);
@@ -264,7 +265,7 @@ impl<T> MutexVecQueue<T> {
     }
 
     /// Moves at most `limit` elements from the queue to the producer.
-    pub fn move_batch_to_producer(&self, producer: &mut impl Producer<T>, limit: usize) {
+    pub fn move_batch_to_producer(&self, producer: &impl SingleProducer<T>, limit: usize) {
         self.inner.lock().move_batch_to_producer(producer, limit);
     }
 
@@ -422,7 +423,7 @@ mod tests {
     #[test]
     fn test_global_queue_with_local() {
         let global_queue = MutexVecQueue::new();
-        let (mut producer, _) = crate::spmc::new_bounded::<_, 256>();
+        let (producer, _) = crate::spmc::new_bounded::<_, 256>();
 
         for i in 0..N / BATCH_SIZE {
             let slice = (0..BATCH_SIZE - 1)
@@ -435,7 +436,7 @@ mod tests {
         }
 
         for i in 0..N / BATCH_SIZE {
-            global_queue.move_batch_to_producer(&mut producer, BATCH_SIZE);
+            global_queue.move_batch_to_producer(&producer, BATCH_SIZE);
 
             for j in 0..BATCH_SIZE {
                 let index = i * BATCH_SIZE + j;

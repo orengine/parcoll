@@ -1,13 +1,16 @@
 [package]
 name = "parcoll"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 description = "Collections for parallel computing, such as SPSC, SPMC, and MPSC and MPMC queues."
 repository = "https://github.com/orengine/parcoll"
 license = "MIT"
-keywords = ["mpsc", "spmc", "spsc", "mpmc", "queue"]
+keywords = ["spmc", "spsc", "mpmc", "queue"]
 categories = ["concurrency", "data-structures"]
 authors = ["Eugene Usachev <https://github.com/Eugene-Usachev> and orengine contributors <team@orengine>"]
+readme = "README.md"
+
+exclude = ["./images/*"]
 
 [dependencies]
 
@@ -25,7 +28,6 @@ loom = "0.7.2"
 default = ["unbounded_slices_always_pow2"]
 unbounded_slices_always_pow2 = []
 always_steal = []
-disable_unbounded = []
 untested_memory_ordering = []
 
 [lints.rust]

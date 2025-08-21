@@ -28,7 +28,7 @@ pub trait MultiConsumerSpawner<T> {
     fn spawn_multi_consumer(&self) -> Self::SpawnedConsumer;
 }
 /// A spawner of lock-free consumer for a single-consumer queue.
-pub trait MultiLockFreeConsumerSpawner<T> {
+pub trait MultiLockFreeConsumerSpawner<T>: MultiConsumerSpawner<T> {
     /// An associated [`MultiLockFreeConsumer`] type.
     type SpawnedLockFreeConsumer: MultiLockFreeConsumer<T>;
 

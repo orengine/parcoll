@@ -19,7 +19,7 @@ use std::mem::{needs_drop, MaybeUninit};
 use std::ops::Deref;
 use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
 use std::{ptr, slice};
-use std::cell::Cell;
+use std::cell::{Cell, UnsafeCell};
 
 // Don't care about ABA because we can count that 16-bit and 32-bit processors never
 // insert + read (2 ^ 16) - 1 or (2 ^ 32) - 1 values while some consumer is preempted.
@@ -47,7 +47,7 @@ use std::cell::Cell;
 ///
 /// Functions [`new_bounded`] and [`new_cache_padded_bounded`] allocate the
 /// [`SPMCUnboundedQueue`](crate::spmc::SPMCUnboundedQueue) on the heap in [`LightArc`]
-/// and provide separate producer and consumer.
+/// and provide producer's and consumer's parts.
 /// It hurts the performance if you don't need to allocate the queue separately but improves
 /// the readability when you need to separate producer and consumer logic and share them.
 ///
@@ -63,7 +63,7 @@ pub struct SPMCBoundedQueue<
     tail: AtomicWrapper,
     cached_head: Cell<LongNumber>,
     head: AtomicWrapper,
-    buffer: [MaybeUninit<T>; CAPACITY],
+    buffer: UnsafeCell<[MaybeUninit<T>; CAPACITY]>,
 }
 
 impl<T: Send, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> + Default>
@@ -80,7 +80,7 @@ impl<T: Send, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> +
         debug_assert!(size_of::<MaybeUninit<T>>() == size_of::<T>()); // Assume that we can just cast it
 
         Self {
-            buffer: [const { MaybeUninit::uninit() }; CAPACITY],
+            buffer: UnsafeCell::new([const { MaybeUninit::uninit() }; CAPACITY]),
             tail: AtomicWrapper::default(),
             cached_head: Cell::new(0),
             head: AtomicWrapper::default(),
@@ -93,14 +93,20 @@ impl<T: Send, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> +
         CAPACITY
     }
 
+    /// Returns a mutable reference to the buffer.
+    #[allow(clippy::mut_from_ref, reason = "It improves readability")]
+    fn buffer_mut(&self) -> &mut [MaybeUninit<T>] {
+        unsafe { &mut *self.buffer.get() }
+    }
+
     /// Returns a pointer to the buffer.
     fn buffer_thin_ptr(&self) -> *const MaybeUninit<T> {
-        (&raw const self.buffer).cast()
+        self.buffer.get() as *const _
     }
 
     /// Returns a mutable pointer to the buffer.
     fn buffer_mut_thin_ptr(&self) -> *mut MaybeUninit<T> {
-        (&raw const self.buffer).cast_mut().cast()
+        self.buffer.get().cast()
     }
 
     /// Returns the number of elements in the queue.
@@ -146,9 +152,9 @@ impl<T: Send, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> +
     #[inline]
     pub unsafe fn producer_len(&self) -> usize {
         let tail = unsafe { self.tail.unsync_load() }; // only the producer can change tail
-        let head = self.head.load(SUSPICIOUS_RELAXED_ACQUIRE);
+        self.cached_head.set(self.head.load(SUSPICIOUS_RELAXED_ACQUIRE));
 
-        Self::len(head, tail)
+        Self::len(self.cached_head.get(), tail)
     }
 
     /// Pops a value from the queue.
@@ -310,18 +316,19 @@ impl<T: Send, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> +
 
         loop {
             let head_idx = head as usize % CAPACITY;
+            let buffer = self.buffer_mut();
 
             let (right, left): (&[MaybeUninit<T>], &[MaybeUninit<T>]) =
                 if head_idx < Self::NUM_VALUES_TAKEN as usize {
                     // we can return only the right half of the queue
                     (
-                        &self.buffer[head_idx..head_idx + Self::NUM_VALUES_TAKEN as usize],
+                        &buffer[head_idx..head_idx + Self::NUM_VALUES_TAKEN as usize],
                         &[],
                     )
                 } else {
                     let left_part_len = head_idx - Self::NUM_VALUES_TAKEN as usize;
 
-                    (&self.buffer[head_idx..], &self.buffer[..left_part_len])
+                    (&buffer[head_idx..], &buffer[..left_part_len])
                 };
 
             // We haven't read the value yet, so we can use `compare_exchange_weak`.
@@ -375,18 +382,19 @@ impl<T: Send, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> +
 
         loop {
             let head_idx = head as usize % CAPACITY;
+            let buffer = self.buffer_mut();
 
             let (right, left): (&[MaybeUninit<T>], &[MaybeUninit<T>]) =
                 if head_idx < Self::NUM_VALUES_TAKEN as usize {
                     // we can return only the right half of the queue
                     (
-                        &self.buffer[head_idx..head_idx + Self::NUM_VALUES_TAKEN as usize],
+                        &buffer[head_idx..head_idx + Self::NUM_VALUES_TAKEN as usize],
                         &[],
                     )
                 } else {
                     let left_part_len = head_idx - Self::NUM_VALUES_TAKEN as usize;
 
-                    (&self.buffer[head_idx..], &self.buffer[..left_part_len])
+                    (&buffer[head_idx..], &buffer[..left_part_len])
                 };
 
             // We haven't read the value yet, so we can use `compare_exchange_weak`.
@@ -427,8 +435,6 @@ impl<T: Send, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> +
 
                         return;
                     }
-
-                    continue;
                 }
             }
         }
@@ -449,17 +455,18 @@ impl<T: Send, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> +
         debug_assert!(tail == head.wrapping_add(CAPACITY as LongNumber) && tail > head);
 
         let head_idx = head as usize % CAPACITY;
+        let buffer = self.buffer_mut();
         let (right, left): (&[MaybeUninit<T>], &[MaybeUninit<T>]) =
             if head_idx < Self::NUM_VALUES_TAKEN as usize {
                 // we can return only the right half of the queue
                 (
-                    &self.buffer[head_idx..head_idx + Self::NUM_VALUES_TAKEN as usize],
+                    &buffer[head_idx..head_idx + Self::NUM_VALUES_TAKEN as usize],
                     &[],
                 )
             } else {
                 let left_part_len = head_idx - Self::NUM_VALUES_TAKEN as usize;
 
-                (&self.buffer[head_idx..], &self.buffer[..left_part_len])
+                (&buffer[head_idx..], &buffer[..left_part_len])
             };
 
         let res = unsafe {
@@ -512,18 +519,19 @@ impl<T: Send, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> +
         debug_assert!(tail == head.wrapping_add(CAPACITY as LongNumber) && tail > head);
 
         let head_idx = head as usize % CAPACITY;
+        let buffer = self.buffer_mut();
 
         let (right, left): (&[MaybeUninit<T>], &[MaybeUninit<T>]) =
             if head_idx < Self::NUM_VALUES_TAKEN as usize {
                 // we can return only the right half of the queue
                 (
-                    &self.buffer[head_idx..head_idx + Self::NUM_VALUES_TAKEN as usize],
+                    &buffer[head_idx..head_idx + Self::NUM_VALUES_TAKEN as usize],
                     &[],
                 )
             } else {
                 let left_part_len = head_idx - Self::NUM_VALUES_TAKEN as usize;
 
-                (&self.buffer[head_idx..], &self.buffer[..left_part_len])
+                (&buffer[head_idx..], &buffer[..left_part_len])
             };
 
         let res = unsafe {
@@ -574,7 +582,7 @@ impl<T: Send, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> +
     #[inline]
     pub unsafe fn producer_push<BR: BatchReceiver<T>>(&self, value: T, batch_receiver: &BR) {
         let tail = unsafe { self.tail.unsync_load() }; // only the producer can change tail
-        let mut head = self.cached_head.get();
+        let head = self.cached_head.get();
 
         if unlikely(Self::len(head, tail) == CAPACITY) {
             self.cached_head.set(self.head.load(SUSPICIOUS_RELAXED_ACQUIRE));
@@ -1053,32 +1061,11 @@ macro_rules! generate_spmc_producer_and_consumer {
             fn maybe_push(&self, value: T) -> Result<(), T> {
                 unsafe { self.inner.producer_maybe_push(value) }
             }
-
-            #[inline]
-            unsafe fn push_many_unchecked(&self, first: &[T], last: &[T]) {
-                unsafe { self.inner.producer_push_many_unchecked(first, last) };
-            }
-
-            #[inline]
-            unsafe fn maybe_push_many(&self, slice: &[T]) -> Result<(), ()> {
-                unsafe { self.inner.producer_maybe_push_many(slice) }
-            }
         }
 
         impl<T: Send, const CAPACITY: usize> $crate::LockFreeProducer<T>
             for $producer_name<T, CAPACITY>
         {
-            unsafe fn lock_free_maybe_push_many(
-                &self,
-                slice: &[T],
-            ) -> Result<(), LockFreePushManyErr> {
-                unsafe {
-                    self.inner
-                        .producer_maybe_push_many(slice)
-                        .map_err(|_| LockFreePushManyErr::NotEnoughSpace)
-                }
-            }
-
             fn lock_free_maybe_push(&self, value: T) -> Result<(), LockFreePushErr<T>> {
                 unsafe {
                     self.inner
@@ -1091,6 +1078,16 @@ macro_rules! generate_spmc_producer_and_consumer {
         impl<T: Send, const CAPACITY: usize> $crate::single_producer::SingleProducer<T>
             for $producer_name<T, CAPACITY>
         {
+            #[inline]
+            unsafe fn push_many_unchecked(&self, first: &[T], last: &[T]) {
+                unsafe { self.inner.producer_push_many_unchecked(first, last) };
+            }
+
+            #[inline]
+            unsafe fn maybe_push_many(&self, slice: &[T]) -> Result<(), ()> {
+                unsafe { self.inner.producer_maybe_push_many(slice) }
+            }
+
             #[inline]
             unsafe fn copy_and_commit_if<F, FSuccess, FError>(
                 &self,
@@ -1108,6 +1105,16 @@ macro_rules! generate_spmc_producer_and_consumer {
         impl<T: Send, const CAPACITY: usize> $crate::single_producer::SingleLockFreeProducer<T>
             for $producer_name<T, CAPACITY>
         {
+            unsafe fn lock_free_maybe_push_many(
+                &self,
+                slice: &[T],
+            ) -> Result<(), LockFreePushManyErr> {
+                unsafe {
+                    self.inner
+                        .producer_maybe_push_many(slice)
+                        .map_err(|_| LockFreePushManyErr::NotEnoughSpace)
+                }
+            }
         }
 
         impl<T: Send, const CAPACITY: usize> $crate::multi_consumer::MultiConsumerSpawner<T>
@@ -1280,14 +1287,11 @@ generate_spmc_producer_and_consumer!(SPMCProducer, SPMCConsumer);
 /// We recommend using a power of two.
 ///
 /// The producer __should__ be only one while consumers can be cloned.
-/// If you want to use more than one producer, don't use this queue.
-///
-/// If you want to use only one consumer, look at the single-producer, single-consumer queue.
 ///
 /// # Bounded queue vs. [`unbounded queue`](crate::spmc::new_unbounded)
 ///
 /// - [`maybe_push`](crate::Producer::maybe_push),
-///   [`maybe_push_many`](crate::Producer::maybe_push_many)
+///   [`maybe_push_many`](crate::single_producer::SingleProducer::maybe_push_many)
 ///   can return an error only for `bounded` queue.
 /// - [`push`](crate::spmc_producer::SPMCProducer::push),
 ///   [`push_many`](crate::spmc_producer::SPMCProducer::push_many)
@@ -1311,7 +1315,7 @@ generate_spmc_producer_and_consumer!(SPMCProducer, SPMCConsumer);
 /// use parcoll::spmc::new_bounded;
 /// use parcoll::{Consumer, Producer};
 ///
-/// let (mut producer, mut consumer) = new_bounded::<_, 256>();
+/// let (producer, consumer) = new_bounded::<_, 256>();
 /// let consumer2 = consumer.clone(); // You can clone the consumer
 ///
 /// producer.maybe_push(1).unwrap();
@@ -1353,14 +1357,11 @@ generate_spmc_producer_and_consumer!(
 /// We recommend using a power of two.
 ///
 /// The producer __should__ be only one while consumers can be cloned.
-/// If you want to use more than one producer, don't use this queue.
-///
-/// If you want to use only one consumer, look at the single-producer, single-consumer queue.
 ///
 /// # Bounded queue vs. [`unbounded queue`](crate::spmc::new_unbounded)
 ///
 /// - [`maybe_push`](crate::Producer::maybe_push),
-///   [`maybe_push_many`](crate::Producer::maybe_push_many)
+///   [`maybe_push_many`](crate::single_producer::SingleProducer::maybe_push_many)
 ///   can return an error only for `bounded` queue.
 /// - [`push`](crate::spmc_producer::SPMCProducer::push),
 ///   [`push_many`](crate::spmc_producer::SPMCProducer::push_many)
@@ -1384,7 +1385,7 @@ generate_spmc_producer_and_consumer!(
 /// use parcoll::spmc::new_bounded;
 /// use parcoll::{Consumer, Producer};
 ///
-/// let (mut producer, mut consumer) = new_bounded::<_, 256>();
+/// let (producer, consumer) = new_bounded::<_, 256>();
 /// let consumer2 = consumer.clone(); // You can clone the consumer
 ///
 /// producer.maybe_push(1).unwrap();
@@ -1420,10 +1421,11 @@ mod tests {
     use super::*;
     use crate::mutex_vec_queue::MutexVecQueue;
     use crate::spmc_producer::{SPMCLockFreeProducer, SPMCProducer};
-    use crate::{Consumer, LockFreeConsumer, LockFreeProducer, Producer};
+    use crate::{Consumer, LockFreeConsumer, Producer};
     use std::collections::VecDeque;
+    use crate::single_producer::{SingleLockFreeProducer, SingleProducer};
 
-    const CAPACITY: usize = 256;
+    const CAPACITY: usize = 16;
 
     #[test]
     fn test_spmc_bounded_size() {
@@ -1473,7 +1475,7 @@ mod tests {
 
         let global_queue = MutexVecQueue::new();
         let (producer1, consumer) = new_bounded::<_, CAPACITY>();
-        let (mut producer2, _) = new_bounded::<_, CAPACITY>();
+        let (producer2, _) = new_bounded::<_, CAPACITY>();
 
         let mut stolen = VecDeque::new();
 
@@ -1482,7 +1484,7 @@ mod tests {
                 producer1.push(i, &global_queue);
             }
 
-            consumer.steal_into(&mut producer2);
+            consumer.steal_into(&producer2);
 
             while let Some(task) = producer2.pop() {
                 stolen.push_back(task);
@@ -1504,7 +1506,7 @@ mod tests {
 
     #[test]
     fn test_spmc_bounded_many() {
-        const BATCH_SIZE: usize = 30;
+        const BATCH_SIZE: usize = 8;
         const N: usize = BATCH_SIZE * 100;
 
         let global_queue = MutexVecQueue::new();
@@ -1585,7 +1587,7 @@ mod tests {
 
         let global_queue = MutexVecQueue::new();
         let (producer1, consumer) = new_bounded::<_, CAPACITY>();
-        let (mut producer2, _) = new_bounded::<_, CAPACITY>();
+        let (producer2, _) = new_bounded::<_, CAPACITY>();
 
         let mut stolen = VecDeque::new();
 
@@ -1594,7 +1596,7 @@ mod tests {
                 producer1.lock_free_push(i, &global_queue).unwrap();
             }
 
-            assert!(!consumer.lock_free_steal_into(&mut producer2).1);
+            assert!(!consumer.lock_free_steal_into(&producer2).1);
 
             while let Ok(task) = producer2.lock_free_pop() {
                 stolen.push_back(task);
@@ -1616,7 +1618,7 @@ mod tests {
 
     #[test]
     fn test_spmc_lock_free_bounded_many() {
-        const BATCH_SIZE: usize = 30;
+        const BATCH_SIZE: usize = 8;
         const N: usize = BATCH_SIZE * 100;
 
         let global_queue = MutexVecQueue::new();
@@ -1661,7 +1663,7 @@ mod tests {
             let mut slice = [MaybeUninit::uninit(); BATCH_SIZE];
 
             assert_eq!(
-                producer.lock_free_pop_many(slice.as_mut_slice()),
+                consumer.lock_free_pop_many(slice.as_mut_slice()),
                 (BATCH_SIZE, false)
             );
 

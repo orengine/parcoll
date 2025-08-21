@@ -12,13 +12,13 @@ use crate::number_types::{
 };
 use crate::single_producer::SingleProducer;
 use crate::suspicious_orders::SUSPICIOUS_RELAXED_ACQUIRE;
-use crate::LockFreePushManyErr;
+use crate::{LockFreePushErr, LockFreePushManyErr};
 use std::marker::PhantomData;
 use std::mem::{needs_drop, MaybeUninit};
 use std::ops::Deref;
 use std::sync::atomic::Ordering::{Acquire, Release};
 use std::{ptr, slice};
-use std::cell::Cell;
+use std::cell::{Cell, UnsafeCell};
 
 // Don't care about ABA because we can count that 16-bit and 32-bit processors never
 // insert + read (2 ^ 16) - 1 or (2 ^ 32) - 1 values while some consumer is preempted.
@@ -46,7 +46,7 @@ use std::cell::Cell;
 /// # Using directly the [`SPSCBoundedQueue`] vs. using [`new_bounded`] or [`new_cache_padded_bounded`].
 ///
 /// Functions [`new_bounded`] and [`new_cache_padded_bounded`] allocate the
-/// [`SPSCBoundedQueue`] on the heap in [`LightArc`] and provide separate producer and consumer.
+/// [`SPSCBoundedQueue`] on the heap in [`LightArc`] and provide producer's and consumer's parts.
 /// It hurts the performance if you don't need to allocate the queue separately but improves
 /// the readability when you need to separate producer and consumer logic and share them.
 #[repr(C)]
@@ -59,7 +59,7 @@ pub struct SPSCBoundedQueue<
     cached_tail: Cell<LongNumber>,
     head: AtomicWrapper,
     cached_head: Cell<LongNumber>,
-    buffer: [MaybeUninit<T>; CAPACITY],
+    buffer: UnsafeCell<[MaybeUninit<T>; CAPACITY]>,
 }
 
 impl<T: Send, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> + Default>
@@ -70,7 +70,7 @@ impl<T: Send, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> +
         debug_assert!(size_of::<MaybeUninit<T>>() == size_of::<T>()); // Assume that we can just cast it
 
         Self {
-            buffer: [const { MaybeUninit::uninit() }; CAPACITY],
+            buffer: UnsafeCell::new([const { MaybeUninit::uninit() }; CAPACITY]),
             tail: AtomicWrapper::default(),
             cached_tail: Cell::new(0),
             head: AtomicWrapper::default(),
@@ -86,12 +86,12 @@ impl<T: Send, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> +
 
     /// Returns a pointer to the buffer.
     fn buffer_thin_ptr(&self) -> *const MaybeUninit<T> {
-        (&raw const self.buffer) as *const _
+        self.buffer.get() as *const _
     }
 
     /// Returns a mutable pointer to the buffer.
     fn buffer_mut_thin_ptr(&self) -> *mut MaybeUninit<T> {
-        (&raw const self.buffer).cast_mut() as *mut _
+        self.buffer.get().cast()
     }
 
     /// Returns the number of elements in the queue.
@@ -136,10 +136,10 @@ impl<T: Send, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> +
     /// This method should be called the only producer.
     #[inline]
     pub unsafe fn producer_len(&self) -> usize {
-        let head = self.head.load(SUSPICIOUS_RELAXED_ACQUIRE);
         let tail = unsafe { self.tail.unsync_load() }; // only the producer can change tail
+        self.cached_head.set(self.head.load(SUSPICIOUS_RELAXED_ACQUIRE));
 
-        Self::len(head, tail)
+        Self::len(self.cached_head.get(), tail)
     }
 
     /// Pushes a value to the queue.
@@ -166,7 +166,7 @@ impl<T: Send, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> +
     #[inline]
     pub unsafe fn producer_maybe_push(&self, value: T) -> Result<(), T> {
         let tail = unsafe { self.tail.unsync_load() }; // only the producer can change tail
-        let mut head = self.cached_head.get();
+        let head = self.cached_head.get();
 
         if unlikely(Self::len(head, tail) >= CAPACITY) {
             self.cached_head.set(self.head.load(SUSPICIOUS_RELAXED_ACQUIRE));
@@ -287,9 +287,9 @@ impl<T: Send, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> +
     #[inline]
     pub unsafe fn consumer_len(&self) -> usize {
         let head = unsafe { self.head.unsync_load() }; // only consumer can change head
-        let tail = self.tail.load(SUSPICIOUS_RELAXED_ACQUIRE);
+        self.cached_tail.set(self.tail.load(SUSPICIOUS_RELAXED_ACQUIRE));
 
-        Self::len(head, tail)
+        Self::len(head, self.cached_tail.get())
     }
 
     /// Pops many values from the queue to the `dst`.
@@ -304,7 +304,7 @@ impl<T: Send, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> +
         let mut available = Self::len(head, self.cached_tail.get());
 
         if unlikely(available < dst.len()) {
-            // Maybe values are not in cache
+            // Maybe values are not in the cache
 
             self.cached_tail.set(self.tail.load(Acquire));
 
@@ -361,7 +361,7 @@ impl<T: Send, const CAPACITY: usize, AtomicWrapper: Deref<Target = LongAtomic> +
 
         self.cached_tail.set(self.tail.load(Acquire)); // always load the latest tail
 
-        let mut n = Self::len(src_head, self.cached_tail.get()) / 2;
+        let n = Self::len(src_head, self.cached_tail.get()) / 2;
 
         // we don't steal less than 4 by default
         // because else we may lose more because of cache locality and NUMA awareness
@@ -476,7 +476,30 @@ macro_rules! generate_spsc_producer_and_consumer {
             fn maybe_push(&self, value: T) -> Result<(), T> {
                 unsafe { self.inner.producer_maybe_push(value) }
             }
+        }
 
+        impl<T: Send, const CAPACITY: usize> $crate::LockFreeProducer<T>
+            for $producer_name<T, CAPACITY>
+        {
+            fn lock_free_maybe_push(&self, mut value: T) -> Result<(), LockFreePushErr<T>> {
+                let res = unsafe {
+                    $crate::single_producer::SingleLockFreeProducer::lock_free_maybe_push_many(
+                        self,
+                        &*(&raw mut value).cast::<[_; 1]>()
+                    )
+                };
+
+                match res {
+                    Ok(()) => Ok(()),
+                    Err(LockFreePushManyErr::NotEnoughSpace) => Err(LockFreePushErr::Full(value)),
+                    Err(LockFreePushManyErr::ShouldWait) => Err(LockFreePushErr::ShouldWait(value)),
+                }
+            }
+        }
+
+        impl<T: Send, const CAPACITY: usize> $crate::single_producer::SingleProducer<T>
+            for $producer_name<T, CAPACITY>
+        {
             #[inline]
             unsafe fn push_many_unchecked(&self, first: &[T], last: &[T]) {
                 unsafe { self.inner.producer_push_many_unchecked(first, last) };
@@ -486,11 +509,7 @@ macro_rules! generate_spsc_producer_and_consumer {
             unsafe fn maybe_push_many(&self, slice: &[T]) -> Result<(), ()> {
                 unsafe { self.inner.producer_maybe_push_many(slice) }
             }
-        }
 
-        impl<T: Send, const CAPACITY: usize> $crate::single_producer::SingleProducer<T>
-            for $producer_name<T, CAPACITY>
-        {
             unsafe fn copy_and_commit_if<F, FSuccess, FError>(
                 &self,
                 right: &[T],
@@ -504,7 +523,7 @@ macro_rules! generate_spsc_producer_and_consumer {
             }
         }
 
-        impl<T: Send, const CAPACITY: usize> $crate::LockFreeProducer<T>
+        impl<T: Send, const CAPACITY: usize> $crate::single_producer::SingleLockFreeProducer<T>
             for $producer_name<T, CAPACITY>
         {
             unsafe fn lock_free_maybe_push_many(
@@ -515,11 +534,6 @@ macro_rules! generate_spsc_producer_and_consumer {
                     .producer_maybe_push_many(slice)
                     .map_err(|_| $crate::lock_free_errors::LockFreePushManyErr::NotEnoughSpace)
             }
-        }
-
-        impl<T: Send, const CAPACITY: usize> $crate::single_producer::SingleLockFreeProducer<T>
-            for $producer_name<T, CAPACITY>
-        {
         }
 
         unsafe impl<T: Send, const CAPACITY: usize> Send for $producer_name<T, CAPACITY> {}
@@ -599,12 +613,11 @@ generate_spsc_producer_and_consumer!(SPSCProducer, SPSCConsumer);
 /// We recommend using a power of two.
 ///
 /// The producer __should__ be only one while consumers can be cloned.
-/// If you want to use more than one producer, don't use this queue.
 ///
 /// # Bounded queue vs. [`unbounded queue`](crate::spsc::new_unbounded)
 ///
 /// - [`maybe_push`](crate::Producer::maybe_push),
-///   [`maybe_push_many`](crate::Producer::maybe_push_many)
+///   [`maybe_push_many`](SingleProducer::maybe_push_many)
 ///   can return an error only for `bounded` queue.
 /// - [`Consumer::steal_into`](crate::Consumer::steal_into)
 ///   and [`Consumer::pop_many`](crate::Consumer::pop_many) can pop zero values even if the source
@@ -626,7 +639,7 @@ generate_spsc_producer_and_consumer!(SPSCProducer, SPSCConsumer);
 /// use parcoll::{Producer, Consumer};
 /// use std::sync::Arc;
 ///
-/// let (mut producer, mut consumer) = new_bounded::<_, 256>();
+/// let (producer, consumer) = new_bounded::<_, 256>();
 ///
 /// producer.maybe_push(1).unwrap();
 /// producer.maybe_push(2).unwrap();
@@ -667,12 +680,11 @@ generate_spsc_producer_and_consumer!(
 /// We recommend using a power of two.
 ///
 /// The producer __should__ be only one while consumers can be cloned.
-/// If you want to use more than one producer, don't use this queue.
 ///
 /// # Bounded queue vs. [`unbounded queue`](crate::spsc::new_unbounded)
 ///
 /// - [`maybe_push`](crate::Producer::maybe_push),
-///   [`maybe_push_many`](crate::Producer::maybe_push_many)
+///   [`maybe_push_many`](SingleProducer::maybe_push_many)
 ///   can return an error only for `bounded` queue.
 /// - [`Consumer::steal_into`](crate::Consumer::steal_into)
 ///   and [`Consumer::pop_many`](crate::Consumer::pop_many) can pop zero values even if the source
@@ -694,7 +706,7 @@ generate_spsc_producer_and_consumer!(
 /// use parcoll::{Producer, Consumer};
 /// use std::sync::Arc;
 ///
-/// let (mut producer, mut consumer) = new_bounded::<_, 256>();
+/// let (producer, consumer) = new_bounded::<_, 256>();
 ///
 /// producer.maybe_push(1).unwrap();
 /// producer.maybe_push(2).unwrap();
@@ -729,6 +741,7 @@ mod tests {
     use super::*;
     use crate::{Consumer, LockFreeConsumer, LockFreeProducer, Producer};
     use std::collections::VecDeque;
+    use crate::single_producer::SingleLockFreeProducer;
 
     const CAPACITY: usize = 256;
 

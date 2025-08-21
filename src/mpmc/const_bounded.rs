@@ -1,11 +1,18 @@
+//! This module provides a multi-producer, multi-consumer bounded queue. Read more in
+//! [`new_bounded`].
+#![allow(clippy::cast_possible_truncation, reason = "LongNumber is always at least usize")]
 use crate::backoff::Backoff;
-use crate::number_types::{LongAtomic, LongNumber, NotCachePaddedLongAtomic};
-use crate::LockFreePopErr;
+use crate::number_types::{CachePaddedLongAtomic, LongAtomic, LongNumber, NotCachePaddedLongAtomic};
+use crate::{Consumer, LockFreeConsumer, LockFreePopErr, LockFreeProducer, LockFreePushErr, Producer};
 use std::cell::UnsafeCell;
 use std::mem::MaybeUninit;
 use std::ops::Deref;
 use std::sync::atomic::Ordering;
 use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
+use crate::hints::unlikely;
+use crate::light_arc::LightArc;
+use std::marker::PhantomData;
+use crate::single_producer::{SingleLockFreeProducer, SingleProducer};
 
 // Implementation notes for an MPMC (multi-producer, multi-consumer) bounded queue.
 //
@@ -126,7 +133,7 @@ impl State {
         state_value: LongNumber,
         capacity: LongNumber,
     ) -> bool {
-        current_tail.wrapping_sub(capacity + 1) == state_value
+        current_tail == state_value.wrapping_add(capacity - 1)
     }
 }
 
@@ -156,6 +163,21 @@ impl<T> Slot<T> {
     }
 }
 
+/// A multi-producer, multi-consumer bounded queue.
+///
+/// It is safe to use when and only when only one thread is writing to the queue at the same time.
+///
+/// It accepts the atomic wrapper as a generic parameter.
+/// It allows using cache-padded atomics or not.
+/// You should create type aliases not to write this large type name.
+///
+/// # Using directly the [`MPMCBoundedQueue`] vs. using [`new_bounded`] or [`new_cache_padded_bounded`].
+///
+/// Functions [`new_bounded`] and [`new_cache_padded_bounded`] allocate the
+/// [`MPMCBoundedQueue`] on the heap in [`LightArc`]
+/// and provide separate producer's and consumer's parts.
+/// It hurts the performance if you don't need to allocate the queue separately but improves
+/// the readability when you need to separate producer and consumer logic and share them.
 #[repr(C)]
 pub struct MPMCBoundedQueue<
     T,
@@ -208,20 +230,68 @@ where
             head: AtomicWrapper::default(),
         }
     }
+}
 
-    /// Tries to push a value into the queue. Returns `Err(value)` if the queue is full.
-    pub(crate) fn maybe_push(&self, value: T) -> Result<(), T> {
+impl<T, const CAPACITY: usize, AtomicWrapper> Default for MPMCBoundedQueue<T, CAPACITY, AtomicWrapper>
+where
+    AtomicWrapper: Deref<Target = LongAtomic> + Default,
+{
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<T, const CAPACITY: usize, AtomicWrapper> Producer<T> for MPMCBoundedQueue<T, CAPACITY, AtomicWrapper>
+where
+    AtomicWrapper: Deref<Target = LongAtomic> + Default,
+{
+    fn capacity(&self) -> usize {
+        CAPACITY
+    }
+
+    fn len(&self) -> usize {
+        let mut head = self.head.load(Relaxed);
         let mut tail = self.tail.load(Relaxed);
-        let mut slot: &Slot<T>; // TODO annotation
+
+        loop {
+            let len = tail.wrapping_sub(head) as usize;
+
+            if unlikely(len > CAPACITY) {
+                // Inconsistent state (this thread has been preempted
+                // after we have loaded `head`,
+                // and before we have loaded `tail`),
+                // try again
+
+                head = self.head.load(Relaxed);
+                tail = self.tail.load(Relaxed);
+
+                continue;
+            }
+
+            return len;
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.head.load(Relaxed) == self.tail.load(Relaxed)
+    }
+
+    fn maybe_push(&self, value: T) -> Result<(), T> {
+        let mut tail = self.tail.load(Relaxed);
+        let mut slot: &Slot<T>;
 
         loop {
             slot = &self.slots[tail as usize % CAPACITY];
             let state = slot.state().load(Acquire);
 
             if State::is_slot_free(tail, state) {
+                // Let the compiler or PU to cache it into the registers
+                // and use in inlined functions
+                let new_tail = tail.wrapping_add(1);
                 let cas_result =
-                    self.tail
-                        .compare_exchange_weak(tail, tail.wrapping_add(1), Relaxed, Relaxed);
+                    self
+                        .tail
+                        .compare_exchange_weak(tail, new_tail, Relaxed, Relaxed);
 
                 match cas_result {
                     Ok(_) => {
@@ -237,7 +307,15 @@ where
                 }
             } else if State::is_queue_full(tail, state, CAPACITY as LongNumber) {
                 // Some value has occupied the slot since the previous lap.
-                // It means that the queue is full.
+                //
+                // It may mean two things:
+                // 1. The queue is full;
+                // 2. The reader has been preempted,
+                //    but another has read the next value.
+                //
+                // But in both cases, we should not push.
+                // We can't try to detect it and push in the next slot.
+
                 break Err(value);
             } else {
                 // We lose the race. Try to push again.
@@ -245,6 +323,15 @@ where
                 // Likely we were preempted, we should not call Backoff::snooze here.
             }
         }
+    }
+}
+
+impl<T, const CAPACITY: usize, AtomicWrapper> LockFreeProducer<T> for MPMCBoundedQueue<T, CAPACITY, AtomicWrapper>
+where
+    AtomicWrapper: Deref<Target = LongAtomic> + Default,
+{
+    fn lock_free_maybe_push(&self, value: T) -> Result<(), LockFreePushErr<T>> {
+        self.maybe_push(value).map_err(LockFreePushErr::Full)
     }
 }
 
@@ -266,18 +353,21 @@ macro_rules! generate_pop_body {
         loop {
             slot = &$self.slots[head as usize % CAPACITY];
             let state = slot.state().load(Acquire);
+            // Let the compiler or PU to cache it into the registers and use in inlined functions
+            let new_head = head.wrapping_add(1);
 
             if State::is_slot_occupied(head, state) {
                 let cas_result =
                     $self
                         .head
-                        .compare_exchange_weak(head, head.wrapping_add(1), Relaxed, Relaxed);
+                        .compare_exchange_weak(head, new_head, Relaxed, Relaxed);
 
                 match cas_result {
                     Ok(_) => {
                         let $success_value_ident = unsafe { slot.read_value() };
 
-                        slot.state()
+                        slot
+                            .state()
                             .mark_as_free(head, CAPACITY as LongNumber, Release);
 
                         $on_success_value
@@ -301,21 +391,19 @@ macro_rules! generate_pop_body {
     }};
 }
 
-// TODO BUG:
-// head is moved -> read interrupt -> producer skip slot
-// before it have been read -> slot is read -> slot is marked as free
-
-impl<T, const CAPACITY: usize, AtomicWrapper> MPMCBoundedQueue<T, CAPACITY, AtomicWrapper>
+impl<T, const CAPACITY: usize, AtomicWrapper> Consumer<T> for MPMCBoundedQueue<T, CAPACITY, AtomicWrapper>
 where
     AtomicWrapper: Deref<Target = LongAtomic> + Default,
 {
-    /// Tries to pop a value from the queue. Returns `None` if the queue is empty.
-    ///
-    /// # Note
-    ///
-    /// This method is not lock-free.
-    /// If you want to use a lock-free version, use [`lock_free_pop`](MPMCBoundedQueue::lock_free_pop).
-    pub(crate) fn pop(&self) -> Option<T> {
+    fn capacity(&self) -> usize {
+        CAPACITY
+    }
+
+    fn len(&self) -> usize {
+        Producer::len(self)
+    }
+
+    fn pop(&self) -> Option<T> {
         generate_pop_body!(
             self,
             backoff,
@@ -331,14 +419,7 @@ where
         )
     }
 
-    /// Pops values from the queue into the given buffer.
-    /// Returns the number of popped values.
-    ///
-    /// # Note
-    ///
-    /// This method is not lock-free.
-    /// If you want to use a lock-free version, use [`lock_free_pop_many`](MPMCBoundedQueue::lock_free_pop_many).
-    pub(crate) fn pop_many(&self, dst: &mut [MaybeUninit<T>]) -> usize {
+    fn pop_many(&self, dst: &mut [MaybeUninit<T>]) -> usize {
         let mut popped = 0;
 
         while popped < dst.len() {
@@ -354,14 +435,31 @@ where
         popped
     }
 
-    /// Tries to pop a value from the queue.
-    /// On failure, returns `Err(`[`LockFreePopErr`]`)`.
-    ///
-    /// # Note
-    ///
-    /// This method is lock-free.
-    /// If you want to use sync non-lock-free version, use [`pop`](MPMCBoundedQueue::pop).
-    pub(crate) fn lock_free_pop(&self) -> Result<T, LockFreePopErr> {
+    fn steal_into(&self, dst: &impl SingleProducer<T>) -> usize {
+        let capacity = dst.capacity() as LongNumber;
+        let start_len = Producer::len(self) as LongNumber;
+        let to_steal = (start_len / 2).min(capacity);
+        let mut i = 0;
+
+        while i < to_steal {
+            if let Some(value) = self.pop() {
+                unsafe { dst.push_many_unchecked(&[value], &[]) };
+
+                i += 1;
+            } else {
+                break;
+            }
+        }
+
+        i as usize
+    }
+}
+
+impl<T, const CAPACITY: usize, AtomicWrapper> LockFreeConsumer<T> for MPMCBoundedQueue<T, CAPACITY, AtomicWrapper>
+where
+    AtomicWrapper: Deref<Target = LongAtomic> + Default,
+{
+    fn lock_free_pop(&self) -> Result<T, LockFreePopErr> {
         generate_pop_body!(
             self,
             _backoff,
@@ -379,14 +477,7 @@ where
         )
     }
 
-    /// Tries to pop a value from the queue.
-    /// Returns the number of popped values and whether the operation failed because it should wait.
-    ///
-    /// # Note
-    ///
-    /// This method is lock-free.
-    /// If you want to use sync non-lock-free version, use [`lock_free_pop`](MPMCBoundedQueue::lock_free_pop).
-    pub(crate) fn lock_free_pop_many(&self, dst: &mut [MaybeUninit<T>]) -> (usize, bool) {
+    fn lock_free_pop_many(&self, dst: &mut [MaybeUninit<T>]) -> (usize, bool) {
         let mut popped = 0;
 
         while popped < dst.len() {
@@ -406,5 +497,478 @@ where
         }
 
         (popped, false)
+    }
+
+    fn lock_free_steal_into(&self, dst: &impl SingleLockFreeProducer<T>) -> (usize, bool) {
+        let capacity = dst.capacity() as LongNumber;
+        let start_len = Producer::len(self) as LongNumber;
+        let to_steal = (start_len / 2).min(capacity);
+        let mut i = 0;
+
+        while i < to_steal {
+            let res = self.lock_free_pop();
+            match res {
+                Ok(value) => {
+                    unsafe { dst.push_many_unchecked(&[value], &[]) };
+
+                    i += 1;
+                }
+                Err(LockFreePopErr::Empty) => break,
+                Err(LockFreePopErr::ShouldWait) => return (i as usize, true),
+            }
+        }
+
+        (i as usize, false)
+    }
+}
+
+impl<T, const CAPACITY: usize, AtomicWrapper> Drop for MPMCBoundedQueue<T, CAPACITY, AtomicWrapper>
+where
+    AtomicWrapper: Deref<Target = LongAtomic> + Default,
+{
+    fn drop(&mut self) {
+        let mut head = unsafe { self.head.unsync_load() };
+        let tail = unsafe { self.tail.unsync_load() };
+
+        while head != tail {
+            unsafe {
+                self.slots.as_mut_ptr().add(head as usize % CAPACITY).drop_in_place();
+            }
+            
+            head += 1;
+        }
+    }
+}
+
+/// Generates MPMC producer and consumer.
+macro_rules! generate_mpmc_producer_and_consumer {
+    ($producer_name:ident, $consumer_name:ident, $atomic_wrapper:ty) => {
+        /// The producer of the [`MPMCBoundedQueue`].
+        pub struct $producer_name<T: Send, const CAPACITY: usize> {
+            inner: LightArc<MPMCBoundedQueue<T, CAPACITY, $atomic_wrapper>>,
+            _non_sync: PhantomData<*const ()>,
+        }
+
+        impl<T: Send, const CAPACITY: usize> $producer_name<T, CAPACITY> {
+            /// Returns a reference to the inner [`MPMCBoundedQueue`].
+            pub fn queue(&self) -> &MPMCBoundedQueue<T, CAPACITY, $atomic_wrapper> {
+                &*self.inner
+            }
+        }
+
+        impl<T: Send, const CAPACITY: usize> $crate::Producer<T> for $producer_name<T, CAPACITY> {
+            #[inline]
+            fn capacity(&self) -> usize {
+                CAPACITY as usize
+            }
+
+            #[inline]
+            fn len(&self) -> usize {
+                $crate::Producer::len(&*self.inner)
+            }
+
+            #[inline]
+            fn maybe_push(&self, value: T) -> Result<(), T> {
+                $crate::Producer::maybe_push(&*self.inner, value)
+            }
+        }
+
+        impl<T: Send, const CAPACITY: usize> $crate::LockFreeProducer<T>
+            for $producer_name<T, CAPACITY>
+        {
+            fn lock_free_maybe_push(&self, value: T) -> Result<(), $crate::lock_free_errors::LockFreePushErr<T>> {
+                $crate::LockFreeProducer::lock_free_maybe_push(&*self.inner, value)
+            }
+        }
+
+        impl<T: Send, const CAPACITY: usize> $crate::multi_producer::MultiProducer<T>
+            for $producer_name<T, CAPACITY>
+        {}
+
+        impl<T: Send, const CAPACITY: usize> $crate::multi_producer::MultiLockFreeProducer<T>
+            for $producer_name<T, CAPACITY>
+        {
+        }
+
+        impl<T: Send, const CAPACITY: usize> $crate::multi_consumer::MultiConsumerSpawner<T>
+            for $producer_name<T, CAPACITY>
+        {
+            type SpawnedConsumer = $consumer_name<T, CAPACITY>;
+
+            fn spawn_multi_consumer(&self) -> Self::SpawnedConsumer {
+                $consumer_name {
+                    inner: self.inner.clone(),
+                    _non_sync: PhantomData,
+                }
+            }
+        }
+
+        impl<T: Send, const CAPACITY: usize> $crate::multi_consumer::MultiLockFreeConsumerSpawner<T>
+            for $producer_name<T, CAPACITY>
+        {
+            type SpawnedLockFreeConsumer = $consumer_name<T, CAPACITY>;
+
+            fn spawn_multi_lock_free_consumer(
+                &self,
+            ) -> Self::SpawnedLockFreeConsumer {
+                $consumer_name {
+                    inner: self.inner.clone(),
+                    _non_sync: PhantomData,
+                }
+            }
+        }
+
+        impl<T: Send, const CAPACITY: usize> Clone for $producer_name<T, CAPACITY> {
+            fn clone(&self) -> Self {
+                Self {
+                    inner: self.inner.clone(),
+                    _non_sync: PhantomData,
+                }
+            }
+        }
+
+        #[allow(clippy::non_send_fields_in_send_ty, reason = "We guarantee it is safe")]
+        unsafe impl<T: Send, const CAPACITY: usize> Send for $producer_name<T, CAPACITY> {}
+
+        /// The consumer of the [`MPMCBoundedQueue`].
+        pub struct $consumer_name<T: Send, const CAPACITY: usize> {
+            inner: LightArc<MPMCBoundedQueue<T, CAPACITY, $atomic_wrapper>>,
+            _non_sync: PhantomData<*const ()>,
+        }
+
+        impl<T: Send, const CAPACITY: usize> $consumer_name<T, CAPACITY> {
+            /// Returns a reference to the inner [`MPMCBoundedQueue`].
+            pub fn queue(&self) -> &MPMCBoundedQueue<T, CAPACITY, $atomic_wrapper> {
+                &*self.inner
+            }
+        }
+
+        impl<T: Send, const CAPACITY: usize> $crate::Consumer<T> for $consumer_name<T, CAPACITY> {
+            #[inline]
+            fn capacity(&self) -> usize {
+                CAPACITY as usize
+            }
+
+            #[inline]
+            fn len(&self) -> usize {
+                $crate::Consumer::len(&*self.inner)
+            }
+
+            #[inline]
+            fn pop_many(&self, dst: &mut [MaybeUninit<T>]) -> usize {
+                $crate::Consumer::pop_many(&*self.inner, dst)
+            }
+
+            #[inline(never)]
+            fn steal_into(&self, dst: &impl $crate::single_producer::SingleProducer<T>) -> usize {
+                $crate::Consumer::steal_into(&*self.inner, dst)
+            }
+        }
+
+        impl<T: Send, const CAPACITY: usize> $crate::LockFreeConsumer<T>
+            for $consumer_name<T, CAPACITY>
+        {
+            #[inline]
+            fn lock_free_pop_many(&self, dst: &mut [MaybeUninit<T>]) -> (usize, bool) {
+                $crate::LockFreeConsumer::lock_free_pop_many(&*self.inner, dst)
+            }
+
+            #[inline(never)]
+            fn lock_free_steal_into(
+                &self,
+                dst: &impl $crate::single_producer::SingleLockFreeProducer<T>,
+            ) -> (usize, bool) {
+                $crate::LockFreeConsumer::lock_free_steal_into(&*self.inner, dst)
+            }
+        }
+
+        impl<T: Send, const CAPACITY: usize> $crate::multi_consumer::MultiConsumer<T>
+            for $consumer_name<T, CAPACITY>
+        {
+        }
+
+        impl<T: Send, const CAPACITY: usize> $crate::multi_consumer::MultiLockFreeConsumer<T>
+            for $consumer_name<T, CAPACITY>
+        {
+        }
+
+        impl<T: Send, const CAPACITY: usize> Clone for $consumer_name<T, CAPACITY> {
+            fn clone(&self) -> Self {
+                Self {
+                    inner: self.inner.clone(),
+                    _non_sync: PhantomData,
+                }
+            }
+        }
+
+        impl<T: Send, const CAPACITY: usize> $crate::multi_producer::MultiProducerSpawner<T>
+            for $consumer_name<T, CAPACITY>
+        {
+            type SpawnedProducer = $producer_name<T, CAPACITY>;
+
+            fn spawn_multi_producer(&self) -> Self::SpawnedProducer {
+                $producer_name {
+                    inner: self.inner.clone(),
+                    _non_sync: PhantomData,
+                }
+            }
+        }
+
+        impl<T: Send, const CAPACITY: usize> $crate::multi_producer::MultiLockFreeProducerSpawner<T>
+            for $consumer_name<T, CAPACITY>
+        {
+            type SpawnedLockFreeProducer = $producer_name<T, CAPACITY>;
+
+            fn spawn_multi_lock_free_producer(
+                &self,
+            ) -> Self::SpawnedLockFreeProducer {
+                $producer_name {
+                    inner: self.inner.clone(),
+                    _non_sync: PhantomData,
+                }
+            }
+        }
+
+        #[allow(clippy::non_send_fields_in_send_ty, reason = "We guarantee it is safe")]
+        unsafe impl<T: Send, const CAPACITY: usize> Send for $consumer_name<T, CAPACITY> {}
+    };
+
+    ($producer_name:ident, $consumer_name:ident) => {
+        generate_mpmc_producer_and_consumer!(
+            $producer_name,
+            $consumer_name,
+            NotCachePaddedLongAtomic
+        );
+    };
+}
+
+generate_mpmc_producer_and_consumer!(MPMCProducer, MPMCConsumer);
+
+/// Creates a new multi-producer, multi-consumer queue with the given capacity.
+/// Returns [`producer`](MPMCProducer) and [`consumer`](MPMCConsumer).
+///
+/// It accepts the capacity as a const generic parameter.
+/// We recommend using a power of two.
+///
+/// # Cache padding
+///
+/// Cache padding can improve the performance of the queue many times, but it also requires
+/// much more memory (likely 128 or 256 more bytes for the queue).
+/// If you can sacrifice some memory for the performance, use [`new_cache_padded_bounded`].
+///
+/// # Examples
+///
+/// ```
+/// use parcoll::mpmc::new_bounded;
+/// use parcoll::{Consumer, Producer};
+///
+/// let (producer, consumer) = new_bounded::<_, 256>();
+/// let producer2 = producer.clone();
+/// let consumer2 = consumer.clone(); // You can clone the consumer
+///
+/// producer.maybe_push(1).unwrap();
+/// producer.maybe_push(2).unwrap();
+///
+/// let mut slice = [std::mem::MaybeUninit::uninit(); 3];
+/// let popped = consumer.pop_many(&mut slice);
+///
+/// assert_eq!(popped, 2);
+/// assert_eq!(unsafe { slice[0].assume_init() }, 1);
+/// assert_eq!(unsafe { slice[1].assume_init() }, 2);
+/// ```
+pub fn new_bounded<T: Send, const CAPACITY: usize>() -> (
+    MPMCProducer<T, CAPACITY>,
+    MPMCConsumer<T, CAPACITY>
+) {
+    let queue = LightArc::new(MPMCBoundedQueue::new());
+
+    (
+        MPMCProducer {
+            inner: queue.clone(),
+            _non_sync: PhantomData,
+        },
+        MPMCConsumer {
+            inner: queue,
+            _non_sync: PhantomData,
+        },
+    )
+}
+
+generate_mpmc_producer_and_consumer!(
+    CachePaddedMPMCProducer,
+    CachePaddedMPMCConsumer,
+    CachePaddedLongAtomic
+);
+
+/// Creates a new multi-producer, multi-consumer queue with the given capacity.
+/// Returns [`producer`](MPMCProducer) and [`consumer`](MPMCConsumer).
+///
+/// It accepts the capacity as a const generic parameter.
+/// We recommend using a power of two.
+///
+/// # Cache padding
+///
+/// Cache padding can improve the performance of the queue many times, but it also requires
+/// much more memory (likely 128 or 256 more bytes for the queue).
+/// If you can't sacrifice some memory for the performance, use [`new_bounded`].
+///
+/// # Examples
+///
+/// ```
+/// use parcoll::mpmc::new_cache_padded_bounded;
+/// use parcoll::{Consumer, Producer};
+///
+/// let (producer, consumer) = new_cache_padded_bounded::<_, 256>();
+/// let producer2 = producer.clone();
+/// let consumer2 = consumer.clone(); // You can clone the consumer
+///
+/// producer.maybe_push(1).unwrap();
+/// producer.maybe_push(2).unwrap();
+///
+/// let mut slice = [std::mem::MaybeUninit::uninit(); 3];
+/// let popped = consumer.pop_many(&mut slice);
+///
+/// assert_eq!(popped, 2);
+/// assert_eq!(unsafe { slice[0].assume_init() }, 1);
+/// assert_eq!(unsafe { slice[1].assume_init() }, 2);
+/// ```
+pub fn new_cache_padded_bounded<T: Send, const CAPACITY: usize>() -> (
+    CachePaddedMPMCProducer<T, CAPACITY>,
+    CachePaddedMPMCConsumer<T, CAPACITY>,
+) {
+    let queue = LightArc::new(MPMCBoundedQueue::new());
+
+    (
+        CachePaddedMPMCProducer {
+            inner: queue.clone(),
+            _non_sync: PhantomData,
+        },
+        CachePaddedMPMCConsumer {
+            inner: queue,
+            _non_sync: PhantomData,
+        },
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::VecDeque;
+    use crate::{spsc, Consumer, LockFreeConsumer, LockFreeProducer, Producer};
+    use super::*;
+
+    const CAPACITY: usize = 16;
+
+    #[test]
+    fn test_mpmc_bounded_seq_insertions() {
+        let (producer, consumer) = new_bounded::<_, CAPACITY>();
+
+        for i in 0..CAPACITY  {
+            producer.maybe_push(i).unwrap();
+        }
+
+        assert!(producer.maybe_push(0).is_err());
+
+        assert_eq!(
+            producer.len(),
+            CAPACITY
+        );
+
+        assert_eq!(
+            consumer.len(),
+            CAPACITY
+        );
+
+        for i in 0..producer.len() {
+            assert_eq!(consumer.pop(), Some(i));
+        }
+    }
+
+    #[test]
+    fn test_mpmc_bounded_stealing() {
+        const TRIES: usize = 10;
+
+        let (producer1, consumer) = new_bounded::<_, CAPACITY>();
+        let (producer2, consumer2) = spsc::new_bounded::<_, CAPACITY>();
+
+        let mut stolen = VecDeque::new();
+
+        for _ in 0..TRIES * 2 {
+            for i in 0..CAPACITY / 2 {
+                producer1.maybe_push(i).unwrap();
+            }
+
+            consumer.steal_into(&producer2);
+
+            while let Some(task) = consumer2.pop() {
+                stolen.push_back(task);
+            }
+        }
+
+        assert!(producer2.is_empty());
+
+        let mut count = 0;
+
+        while let Some(_) = consumer.pop() {
+            count += 1;
+        }
+
+        assert_eq!(count + stolen.len(), CAPACITY * TRIES);
+    }
+
+    #[test]
+    fn test_mpmc_lock_free_bounded_seq_insertions() {
+        let (producer, consumer) = new_bounded::<_, CAPACITY>();
+
+        for i in 0..CAPACITY  {
+            producer.lock_free_maybe_push(i).unwrap();
+        }
+
+        assert!(producer.lock_free_maybe_push(0).is_err());
+
+        assert_eq!(
+            producer.len(),
+            CAPACITY
+        );
+
+        assert_eq!(
+            consumer.len(),
+            CAPACITY
+        );
+
+        for i in 0..producer.len() {
+            assert_eq!(consumer.lock_free_pop().unwrap(), i);
+        }
+    }
+
+    #[test]
+    fn test_mpmc_lock_free_bounded_stealing() {
+        const TRIES: usize = 10;
+
+        let (producer1, consumer) = new_bounded::<_, CAPACITY>();
+        let (producer2, consumer2) = spsc::new_bounded::<_, CAPACITY>();
+
+        let mut stolen = VecDeque::new();
+
+        for _ in 0..TRIES * 2 {
+            for i in 0..CAPACITY / 2 {
+                producer1.lock_free_maybe_push(i).unwrap();
+            }
+
+            consumer.lock_free_steal_into(&producer2);
+
+            while let Ok(task) = consumer2.lock_free_pop() {
+                stolen.push_back(task);
+            }
+        }
+
+        assert!(producer2.is_empty());
+
+        let mut count = 0;
+
+        while let Ok(_) = consumer.lock_free_pop() {
+            count += 1;
+        }
+
+        assert_eq!(count + stolen.len(), CAPACITY * TRIES);
     }
 }

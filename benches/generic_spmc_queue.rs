@@ -1,6 +1,6 @@
 //! Generic traits for queue benchmarking.
 
-use parcoll::{spmc, Consumer, LightArc, Producer};
+use parcoll::{mpmc, spmc, Consumer, LightArc, Producer};
 use st3;
 use parcoll::multi_consumer::MultiConsumerSpawner;
 
@@ -262,8 +262,7 @@ impl<T: Send> GenericStealer<T> for LightArc<crossbeam_queue::SegQueue<T>> {
 
 // region parcoll
 
-impl<T: Send, const CAPACITY: usize> GenericWorker<T>
-    for spmc::CachePaddedSPMCProducer<T, CAPACITY>
+impl<T: Send, const CAPACITY: usize> GenericWorker<T> for spmc::CachePaddedSPMCProducer<T, CAPACITY>
 {
     fn new() -> Self {
         let (producer, _) = spmc::new_cache_padded_bounded();
@@ -284,8 +283,7 @@ impl<T: Send, const CAPACITY: usize> GenericWorker<T>
     }
 }
 
-impl<T: Send, const CAPACITY: usize> GenericStealer<T>
-    for spmc::CachePaddedSPMCConsumer<T, CAPACITY>
+impl<T: Send, const CAPACITY: usize> GenericStealer<T> for spmc::CachePaddedSPMCConsumer<T, CAPACITY>
 {
     type W = spmc::CachePaddedSPMCProducer<T, CAPACITY>;
 
@@ -331,6 +329,46 @@ impl<T: Send> GenericStealer<T> for spmc::CachePaddedSPMCUnboundedConsumer<T> {
         } else {
             Err(GenericStealError::Empty) // But we can't be sure
         }
+    }
+}
+
+impl<T: Send, const CAPACITY: usize> GenericWorker<T> for mpmc::CachePaddedMPMCProducer<T, CAPACITY> {
+    fn new() -> Self {
+        let (producer, _) = mpmc::new_cache_padded_bounded();
+
+        producer
+    }
+
+    fn push(&self, item: T) -> Result<(), T> {
+        parcoll::Producer::maybe_push(self, item)
+    }
+
+    fn pop(&self) -> Option<T> {
+        Consumer::pop(self.queue())
+    }
+
+    fn stealer(&self) -> impl GenericStealer<T, W=Self> {
+        self.spawn_multi_consumer()
+    }
+}
+
+impl<T: Send, const CAPACITY: usize> GenericStealer<T> for mpmc::CachePaddedMPMCConsumer<T, CAPACITY> {
+    type W = mpmc::CachePaddedMPMCProducer<T, CAPACITY>;
+
+    fn steal_batch(&self, worker: &Self::W) -> Result<(), GenericStealError> {
+        let src_len = Producer::len(self.queue());
+
+        if src_len == 0 {
+            return Err(GenericStealError::Empty);
+        }
+
+        let dst_vacant = Producer::capacity(worker) - Producer::len(worker);
+
+        for _ in 0..(src_len - src_len / 2).min(dst_vacant) {
+            let _ = worker.push(Consumer::pop(self.queue()).unwrap());
+        }
+
+        Ok(())
     }
 }
 

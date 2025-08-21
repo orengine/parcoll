@@ -105,7 +105,11 @@ pub trait SPMCLockFreeProducer<T>: SingleProducer<T> + SingleLockFreeProducer<T>
         };
 
         match res {
-            Ok(()) => Ok(mem::forget(value)),
+            Ok(()) => {
+                mem::forget(value);
+
+                Ok(())
+            },
             Err(()) => Err(value),
         }
     }
