@@ -1,13 +1,13 @@
+pub mod generic_spmc_queue;
+
 use crate::generic_spmc_queue::{
     CrossbeamFifoWorker, CrossbeamLifoWorker, GenericStealer, GenericWorker,
 };
 use criterion::{criterion_group, criterion_main, Criterion};
-use parcoll::{spsc, LightArc};
-use std::sync::atomic::AtomicU64;
+use parcoll::{mpmc, spsc, LightArc};
 use std::time::Instant;
-use parcoll::spsc::Consumer;
-
-pub(crate) mod generic_spmc_queue;
+use parcoll::single_consumer::SingleConsumer;
+use parcoll::single_producer::SingleProducer;
 
 // Single-threaded benchmark.
 //
@@ -36,9 +36,9 @@ pub fn push_pop<W: GenericWorker<usize>, const N: usize>(name: &str, c: &mut Cri
 
 pub fn push_pop_spsc<P, C, Creator, const N: usize>(name: &str, creator: Creator, c: &mut Criterion)
 where
-    P: spsc::Producer<usize>,
-    C: Consumer<usize>,
-    Creator: Fn() -> (P, C)
+    P: SingleProducer<usize>,
+    C: SingleConsumer<usize>,
+    Creator: Fn() -> (P, C),
 {
     let (producer, consumer) = creator();
 
@@ -80,24 +80,15 @@ pub fn push_pop_small_crossbeam_lifo(c: &mut Criterion) {
 }
 
 pub fn push_pop_small_crossbeam_array_queue(c: &mut Criterion) {
-    push_pop::<LightArc<crossbeam_queue::ArrayQueue<_>>, 8>(
-        "small-crossbeam_array_queue",
-        c,
-    );
+    push_pop::<LightArc<crossbeam_queue::ArrayQueue<_>>, 8>("small-crossbeam_array_queue", c);
 }
 
 pub fn push_pop_small_crossbeam_seg_queue(c: &mut Criterion) {
-    push_pop::<LightArc<crossbeam_queue::SegQueue<_>>, 8>(
-        "small-crossbeam_seg_queue",
-        c,
-    );
+    push_pop::<LightArc<crossbeam_queue::SegQueue<_>>, 8>("small-crossbeam_seg_queue", c);
 }
 
 pub fn push_pop_small_parcoll_spmc_bounded(c: &mut Criterion) {
-    push_pop::<parcoll::spmc::CachePaddedSPMCProducer<_, 256>, 8>(
-        "small-parcoll_spmc_bounded",
-        c,
-    );
+    push_pop::<parcoll::spmc::CachePaddedSPMCProducer<_, 256>, 8>("small-parcoll_spmc_bounded", c);
 }
 
 pub fn push_pop_small_parcoll_spmc_unbounded(c: &mut Criterion) {
@@ -123,6 +114,10 @@ pub fn push_pop_small_parcoll_spsc_unbounded(c: &mut Criterion) {
     );
 }
 
+pub fn push_pop_small_parcoll_mpmc_bounded(c: &mut Criterion) {
+    push_pop::<mpmc::CachePaddedMPMCProducer<_, 256>, 8>("small-parcoll_mpmc_bounded", c);
+}
+
 // endregion
 
 // region push_pop large
@@ -144,17 +139,11 @@ pub fn push_pop_large_crossbeam_lifo(c: &mut Criterion) {
 }
 
 pub fn push_pop_large_crossbeam_array_queue(c: &mut Criterion) {
-    push_pop::<LightArc<crossbeam_queue::ArrayQueue<_>>, 256>(
-        "large-crossbeam_array_queue",
-        c,
-    );
+    push_pop::<LightArc<crossbeam_queue::ArrayQueue<_>>, 256>("large-crossbeam_array_queue", c);
 }
 
 pub fn push_pop_large_crossbeam_seg_queue(c: &mut Criterion) {
-    push_pop::<LightArc<crossbeam_queue::SegQueue<_>>, 256>(
-        "large-crossbeam_seg_queue",
-        c,
-    );
+    push_pop::<LightArc<crossbeam_queue::SegQueue<_>>, 256>("large-crossbeam_seg_queue", c);
 }
 
 pub fn push_pop_large_parcoll_spmc_bounded(c: &mut Criterion) {
@@ -187,9 +176,11 @@ pub fn push_pop_large_parcoll_spsc_unbounded(c: &mut Criterion) {
     );
 }
 
-// endregion
+pub fn push_pop_large_parcoll_mpmc_bounded(c: &mut Criterion) {
+    push_pop::<mpmc::CachePaddedMPMCProducer<_, 256>, 256>("large-parcoll_mpmc_bounded", c);
+}
 
-static NEXT_SEED: AtomicU64 = AtomicU64::new(0);
+// endregion
 
 pub fn push_pop_steal<T, W: GenericWorker<u64> + 'static>(name: &str, c: &mut Criterion) {
     const NUMBER_OF_ITEMS: u64 = 256;
@@ -253,6 +244,13 @@ pub fn push_pop_steal_parcoll_spmc_unbounded(c: &mut Criterion) {
     );
 }
 
+pub fn push_pop_steal_parcoll_mpmc_bounded(c: &mut Criterion) {
+    push_pop_steal::<u64, mpmc::CachePaddedMPMCProducer<_, 256>>(
+        "parcoll_mpmc_bounded batch",
+        c,
+    );
+}
+
 criterion_group!(
     push_pop_benchmark,
     push_pop_small_st3_fifo,
@@ -265,6 +263,7 @@ criterion_group!(
     push_pop_small_parcoll_spmc_unbounded,
     push_pop_small_parcoll_spsc_bounded,
     push_pop_small_parcoll_spsc_unbounded,
+    push_pop_small_parcoll_mpmc_bounded,
     push_pop_large_st3_fifo,
     push_pop_large_st3_lifo,
     push_pop_large_crossbeam_fifo,
@@ -274,29 +273,12 @@ criterion_group!(
     push_pop_large_parcoll_spmc_bounded,
     push_pop_large_parcoll_spmc_unbounded,
     push_pop_large_parcoll_spsc_bounded,
-    push_pop_large_parcoll_spsc_unbounded
+    push_pop_large_parcoll_spsc_unbounded,
+    push_pop_large_parcoll_mpmc_bounded
 );
 
 criterion_group!(
     push_pop_steal_benchmark,
-    push_pop_small_st3_fifo,
-    push_pop_small_st3_lifo,
-    push_pop_small_crossbeam_fifo,
-    push_pop_small_crossbeam_lifo,
-    push_pop_small_crossbeam_array_queue,
-    push_pop_small_crossbeam_seg_queue,
-    push_pop_small_parcoll_spmc_bounded,
-    push_pop_small_parcoll_spmc_unbounded,
-    push_pop_small_parcoll_spsc_bounded,
-    push_pop_large_st3_fifo,
-    push_pop_large_st3_lifo,
-    push_pop_large_crossbeam_fifo,
-    push_pop_large_crossbeam_lifo,
-    push_pop_large_crossbeam_array_queue,
-    push_pop_large_crossbeam_seg_queue,
-    push_pop_large_parcoll_spmc_bounded,
-    push_pop_large_parcoll_spmc_unbounded,
-    push_pop_large_parcoll_spsc_bounded,
     push_pop_steal_st3_fifo,
     push_pop_steal_st3_lifo,
     push_pop_steal_crossbeam_fifo,
@@ -304,7 +286,8 @@ criterion_group!(
     push_pop_steal_crossbeam_array_queue,
     push_pop_steal_crossbeam_seg_queue,
     push_pop_steal_parcoll_spmc_bounded,
-    push_pop_steal_parcoll_spmc_unbounded
+    push_pop_steal_parcoll_spmc_unbounded,
+    push_pop_steal_parcoll_mpmc_bounded
 );
 
 criterion_main!(push_pop_benchmark, push_pop_steal_benchmark);

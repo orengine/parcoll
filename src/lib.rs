@@ -1,3 +1,65 @@
+//! # `ParColl`
+//!
+//! This crate provides optimized collections which can be used in concurrent runtimes.
+//!
+//! It provides optimized ring-based [`SPSC`](spsc)
+//! ([`const bounded`](spsc::new_bounded) or [`unbounded`](spsc::new_unbounded)),
+//! [`SPMC`](spmc) ([`const bounded`](spmc::new_bounded) or [`unbounded`](spmc::new_unbounded)),
+//! and [`const bounded`](mpmc::new_bounded) [`MPMC`](mpmc) queue.
+//!
+//! All queues are lock-free (or lock-free with the proper generics),
+//! generalized and can be either be cache-padded or not.
+//!
+//! It also provides other useful utilities like [`LightArc`] or [`hints`].
+//!
+//! ```rust
+//! use parcoll::{Consumer, Producer};
+//!
+//! fn mpmc() {
+//!     let (producer, consumer) = parcoll::mpmc::new_cache_padded_bounded::<_, 256>();
+//!     let producer2 = producer.clone();
+//!     let consumer2 = consumer.clone(); // You can clone the consumer
+//!
+//!     producer.maybe_push(1).unwrap();
+//!     producer.maybe_push(2).unwrap();
+//!
+//!     let mut slice = [std::mem::MaybeUninit::uninit(); 3];
+//!     let popped = consumer.pop_many(&mut slice);
+//!
+//!     assert_eq!(popped, 2);
+//!     assert_eq!(unsafe { slice[0].assume_init() }, 1);
+//!     assert_eq!(unsafe { slice[1].assume_init() }, 2);
+//! }
+//!
+//! fn spsc_unbounded() {
+//!     let (producer, consumer) = parcoll::spsc::new_cache_padded_unbounded();
+//!
+//!     producer.maybe_push(1).unwrap();
+//!     producer.maybe_push(2).unwrap();
+//!
+//!     let mut slice = [std::mem::MaybeUninit::uninit(); 3];
+//!     let popped = consumer.pop_many(&mut slice);
+//!
+//!     assert_eq!(popped, 2);
+//!     assert_eq!(unsafe { slice[0].assume_init() }, 1);
+//!     assert_eq!(unsafe { slice[1].assume_init() }, 2);
+//! }
+//!
+//! fn spmc() {
+//!     let (producer1, consumer1) = parcoll::spmc::new_bounded::<_, 256>();
+//!     let (producer2, consumer2) = parcoll::spmc::new_bounded::<_, 256>();
+//!
+//!     for i in 0..100 {
+//!         producer1.maybe_push(i).unwrap();
+//!     }
+//!
+//!     consumer1.steal_into(&producer2);
+//!
+//!     assert_eq!(producer2.len(), 50);
+//!     assert_eq!(consumer1.len(), 50);
+//! }
+//! ```
+
 #![deny(clippy::all)]
 #![deny(clippy::assertions_on_result_states)]
 #![deny(clippy::match_wild_err_arm)]
@@ -5,6 +67,10 @@
 #![warn(clippy::pedantic)]
 #![warn(clippy::nursery)]
 #![warn(clippy::cargo)]
+#![allow(
+    clippy::multiple_crate_versions,
+    reason = "They were set by dev-dependencies"
+)]
 #![allow(async_fn_in_trait, reason = "It improves readability.")]
 #![allow(
     clippy::missing_const_for_fn,
@@ -41,21 +107,36 @@
     reason = "The function's doc should explain what it returns."
 )]
 pub mod backoff;
+pub(crate) mod batch_receiver;
+pub mod buffer_version;
 pub mod cache_padded;
+mod consumer;
 pub mod hints;
 mod light_arc;
+mod lock_free_errors;
 #[cfg(all(parcoll_loom, test))]
 mod loom;
-pub mod loom_bindings;
+pub(crate) mod loom_bindings;
+pub mod mpmc;
+pub mod multi_consumer;
+pub mod multi_producer;
 pub(crate) mod mutex_vec_queue;
-pub(crate) mod naive_rw_lock;
+pub mod naive_rw_lock;
 pub mod number_types;
+mod producer;
+pub mod single_consumer;
+pub mod single_producer;
 pub mod spmc;
+pub mod spmc_producer;
 pub mod spsc;
-pub(crate) mod sync_batch_receiver;
+pub(crate) mod suspicious_orders;
+pub mod sync_cell;
 #[cfg(not(parcoll_loom))]
 mod test_lock;
 
+pub use batch_receiver::BatchReceiver;
+pub use consumer::{Consumer, LockFreeConsumer};
 pub use light_arc::LightArc;
+pub use lock_free_errors::*;
 pub use mutex_vec_queue::MutexVecQueue;
-pub use sync_batch_receiver::SyncBatchReceiver;
+pub use producer::{LockFreeProducer, Producer};

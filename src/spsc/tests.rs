@@ -1,50 +1,26 @@
 use crate::backoff::Backoff;
 use crate::loom_bindings::thread::yield_now;
-use crate::spsc::{new_bounded, new_cache_padded_bounded, new_cache_padded_unbounded, new_unbounded, Consumer as ConsumerExt, Producer as ProducerExt};
+use crate::single_producer::SingleProducer;
+use crate::spsc::{
+    new_bounded, new_cache_padded_bounded, new_cache_padded_unbounded, new_unbounded,
+};
 use crate::test_lock::TEST_LOCK;
+use crate::{Consumer as ConsumerExt, Producer as ProducerExt};
 use std::mem::MaybeUninit;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread::spawn;
-// Note: test values are boxed in Miri tests so that destructors called on freed
-// values and forgotten destructors can be detected.
-
-#[cfg(miri)]
-type TestValue<T> = Box<T>;
-
-#[cfg(not(miri))]
-#[derive(Debug, Default, PartialEq, Copy, Clone)]
-struct TestValue<T>(T);
-
-#[cfg(not(miri))]
-impl<T> TestValue<T> {
-    fn new(val: T) -> Self {
-        Self(val)
-    }
-}
-
-#[cfg(not(miri))]
-impl<T> std::ops::Deref for TestValue<T> {
-    type Target = T;
-
-    fn deref(&self) -> &T {
-        &self.0
-    }
-}
 
 static RAND: AtomicUsize = AtomicUsize::new(4);
 
+#[allow(clippy::uninlined_format_args, reason = "Else cargo shows a warning")]
 fn test_spsc_multi_threaded_steal<Producer, Consumer>(creator: fn() -> (Producer, Consumer))
 where
-    Producer: ProducerExt<TestValue<usize>> + Send + 'static,
-    Consumer: ConsumerExt<TestValue<usize>, AssociatedProducer = Producer> + Send + 'static,
+    Producer: ProducerExt<usize> + SingleProducer<usize> + Send + 'static,
+    Consumer: ConsumerExt<usize> + Send + 'static,
 {
-    const N: usize = if cfg!(miri) { 200 } else { 1_000_000 };
-    const CHECK_TO: usize = if cfg!(feature = "always_steal") {
-        N
-    } else {
-        N - 10
-    };
+    const N: usize = 1_000_000;
+    const CHECK_TO: usize = N - 10;
 
     let (producer, consumer) = creator();
 
@@ -56,7 +32,7 @@ where
 
         'outer: loop {
             for _ in 0..RAND.fetch_add(1, Ordering::Relaxed) % 1000 {
-                while let Err(_) = producer.maybe_push(TestValue::new(i)) {}
+                while producer.maybe_push(i).is_err() {}
 
                 i += 1;
 
@@ -81,13 +57,13 @@ where
             consumer.steal_into(&dst_producer);
 
             while let Some(i) = dst_consumer.pop() {
-                stats[*i] += 1;
+                stats[i] += 1;
                 counter.fetch_add(1, Ordering::Relaxed);
             }
 
             let count = counter.load(Ordering::Relaxed);
 
-            if count == N || !cfg!(feature = "always_steal") && count > CHECK_TO {
+            if count > CHECK_TO {
                 break;
             }
 
@@ -102,14 +78,8 @@ where
 
     t0.join().unwrap();
 
-    let check_to = if cfg!(feature = "always_steal") {
-        N
-    } else {
-        CHECK_TO
-    };
-
-    if consumer.len() + check_to > N {
-        let mut delta = consumer.len() + check_to - N;
+    if consumer.len() + CHECK_TO > N {
+        let mut delta = consumer.len() + CHECK_TO - N;
         assert!(delta < 100);
 
         let mut slice = [const { MaybeUninit::uninit() }; 100];
@@ -117,35 +87,35 @@ where
         while delta > 0 {
             let popped = consumer.pop_many(slice.as_mut_slice());
             for i in 0..popped {
-                stats[unsafe { *slice[i].assume_init() }] += 1;
+                stats[unsafe { slice[i].assume_init() }] += 1;
                 delta -= 1;
             }
         }
     }
 
-    for i in 0..check_to {
-        assert_eq!(stats[i], 1, "stats[{i}] = {}", stats[i]);
+    for (i, item) in stats.iter().enumerate().take(CHECK_TO) {
+        assert_eq!(*item, 1, "stats[{}] = {item}", i);
     }
 }
 
 fn test_spsc_multi_threaded_pop_many<Producer, Consumer>(creator: fn() -> (Producer, Consumer))
 where
-    Producer: ProducerExt<TestValue<usize>> + Send + 'static,
-    Consumer: ConsumerExt<TestValue<usize>, AssociatedProducer = Producer> + Send + 'static,
+    Producer: SingleProducer<usize> + Send + 'static,
+    Consumer: ConsumerExt<usize> + Send + 'static,
 {
-    const N: usize = if cfg!(miri) { 200 } else { 1_000_000 };
+    const N: usize = 1_000_000;
     const BATCH_SIZE: usize = 5;
     const RES: usize = (N - 1) * N / 2;
 
     let consumer_pop_many = |consumer: &Consumer, count: &AtomicUsize| {
-        let mut slice = [MaybeUninit::uninit(); BATCH_SIZE];
+        let mut slice = [const { MaybeUninit::uninit() }; BATCH_SIZE];
         let backoff = Backoff::new();
 
         for _ in 0..N {
             let popped = consumer.pop_many(&mut slice);
 
-            for i in 0..popped {
-                let res = count.fetch_add(unsafe { *slice[i].assume_init() }, Ordering::Relaxed);
+            for item in slice.iter().take(popped) {
+                let res = count.fetch_add(unsafe { item.assume_init() }, Ordering::Relaxed);
 
                 if res == RES {
                     break;
@@ -166,10 +136,10 @@ where
 
     let t0 = spawn(move || consumer_pop_many(&consumer, &count1));
 
-    let mut slice = [TestValue(0); BATCH_SIZE];
+    let mut slice = [0; BATCH_SIZE];
     for i in 0..N / BATCH_SIZE {
-        for j in 0..BATCH_SIZE {
-            slice[j] = TestValue(i * BATCH_SIZE + j);
+        for (j, item) in slice.iter_mut().enumerate().take(BATCH_SIZE) {
+            *item = i * BATCH_SIZE + j;
         }
 
         let backoff = Backoff::new();
@@ -188,11 +158,11 @@ where
 fn test_bounded_spsc_multi_threaded_steal() {
     let test_guard = TEST_LOCK.lock();
 
-    test_spsc_multi_threaded_steal(new_bounded::<TestValue<usize>, 256>);
+    test_spsc_multi_threaded_steal(new_bounded::<usize, 256>);
 
     println!("Non cache padded done, start cache padded");
 
-    test_spsc_multi_threaded_steal(new_cache_padded_bounded::<TestValue<usize>, 256>);
+    test_spsc_multi_threaded_steal(new_cache_padded_bounded::<usize, 256>);
 
     drop(test_guard);
 }
@@ -226,11 +196,11 @@ fn test_unbounded_spsc_multi_threaded_steal() {
 fn test_bounded_spsc_multi_threaded_pop_many() {
     let test_guard = TEST_LOCK.lock();
 
-    test_spsc_multi_threaded_pop_many(new_bounded::<TestValue<usize>, 256>);
+    test_spsc_multi_threaded_pop_many(new_bounded::<usize, 256>);
 
     println!("Non cache padded done, start cache padded");
 
-    test_spsc_multi_threaded_pop_many(new_cache_padded_bounded::<TestValue<usize>, 256>);
+    test_spsc_multi_threaded_pop_many(new_cache_padded_bounded::<usize, 256>);
 
     drop(test_guard);
 }
