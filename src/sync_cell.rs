@@ -1,5 +1,5 @@
 //! This module provides the [`SyncCell`] and the [`LockFreeSyncCell`] traits.
-use crate::backoff::Backoff;
+use orengine_utils::backoff::Backoff;
 use crate::naive_rw_lock::NaiveRWLock;
 
 /// A thread-safe cell that can be used as `atomic` for any type.

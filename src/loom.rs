@@ -1,5 +1,5 @@
 #![cfg(all(parcoll_loom, test))]
-use parcoll::backoff::Backoff;
+use orengine_utils::backoff::Backoff;
 use parcoll::multi_consumer::MultiConsumer;
 use parcoll::multi_producer::MultiProducer;
 use parcoll::single_producer::SingleProducer;
@@ -7,7 +7,7 @@ use parcoll::spmc::{
     new_bounded, new_cache_padded_bounded, new_cache_padded_unbounded, new_unbounded,
 };
 use parcoll::spmc_producer::SPMCProducer;
-use parcoll::{mpmc, spsc, Consumer, Producer};
+use parcoll::{mpmc, spsc, Consumer};
 use std::thread::spawn;
 use std::time::{Duration, Instant};
 
@@ -234,7 +234,6 @@ where
     C: MultiConsumer<usize> + 'static + Send,
     Cr: 'static + Sync + Send + Clone + Copy + Fn() -> (P, C),
 {
-    const LOOP_COUNT: usize = 20;
     const ITEMS: usize = 10_000;
     const PAR_MULTIPLIER: usize = 3;
 

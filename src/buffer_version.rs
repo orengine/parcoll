@@ -1,5 +1,5 @@
-use crate::hints::unreachable_hint;
-use crate::LightArc;
+use orengine_utils::light_arc::LightArc;
+use orengine_utils::hints::unreachable_hint;
 use std::alloc::{alloc, Layout};
 use std::mem::MaybeUninit;
 use std::slice;

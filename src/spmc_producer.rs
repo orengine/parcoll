@@ -1,5 +1,5 @@
+use orengine_utils::hints::unlikely;
 use crate::batch_receiver::LockFreeBatchReceiver;
-use crate::hints::unlikely;
 use crate::single_producer::{SingleLockFreeProducer, SingleProducer};
 use crate::{BatchReceiver, LockFreePopErr};
 use std::mem;

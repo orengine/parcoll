@@ -4,12 +4,12 @@
     clippy::cast_possible_truncation,
     reason = "LongNumber should be synonymous to usize"
 )]
+use orengine_utils::light_arc::LightArc;
+use orengine_utils::hints::{cold_path, unlikely};
 use crate::buffer_version::{
     pack_version_and_tail, unpack_version_and_tail, CachedVersion, Version,
 };
 use crate::cache_padded::{CachePaddedAtomicU32, CachePaddedAtomicU64};
-use crate::hints::{cold_path, unlikely};
-use crate::light_arc::LightArc;
 use crate::loom_bindings::sync::atomic::{AtomicU32, AtomicU64};
 use crate::naive_rw_lock::NaiveRWLock;
 use crate::number_types::{NotCachePaddedAtomicU32, NotCachePaddedAtomicU64};

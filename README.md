@@ -8,8 +8,6 @@ SPMC (const bounded or unbounded) and bounded MPMC queue.
 All queues are lock-free (or lock-free with the proper generics), generalized and can be
 either be cache-padded or not.
 
-It also provides other useful utilities like `LightArc` or hints.
-
 # Usage
 
 ```rust

@@ -4,9 +4,9 @@
     clippy::cast_possible_truncation,
     reason = "LongNumber is always at least usize"
 )]
-use crate::backoff::Backoff;
-use crate::hints::unlikely;
-use crate::light_arc::LightArc;
+use orengine_utils::hints::unlikely;
+use orengine_utils::backoff::Backoff;
+use orengine_utils::light_arc::LightArc;
 use crate::number_types::{
     CachePaddedLongAtomic, LongAtomic, LongNumber, NotCachePaddedLongAtomic,
 };
