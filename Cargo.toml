@@ -1,6 +1,6 @@
 [package]
 name = "parcoll"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2021"
 description = "Collections for parallel computing, such as SPSC, SPMC, and MPSC and MPMC queues."
 repository = "https://github.com/orengine/parcoll"
@@ -14,6 +14,7 @@ rust-version = "1.83.0"
 exclude = ["./images/*"]
 
 [dependencies]
+orengine-utils = "1.0.4"
 
 [target.'cfg(parcoll_loom)'.dependencies]
 loom = "0.7.2"

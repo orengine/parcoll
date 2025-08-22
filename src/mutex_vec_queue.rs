@@ -1,9 +1,10 @@
 //! This module provides the [`MutexVecQueue`].
+use orengine_utils::hints::unlikely;
+use orengine_utils::light_arc::LightArc;
+use orengine_utils::hints::assert_hint;
 use crate::batch_receiver::{BatchReceiver, LockFreeBatchReceiver, LockFreePushBatchErr};
-use crate::hints::{assert_hint, unlikely};
 use crate::loom_bindings::sync::Mutex;
 use crate::single_producer::SingleProducer;
-use crate::LightArc;
 use std::ptr::slice_from_raw_parts;
 use std::{mem, ptr};
 

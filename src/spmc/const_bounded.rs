@@ -6,9 +6,9 @@
     clippy::cast_possible_truncation,
     reason = "LongNumber should be synonymous to usize"
 )]
+use orengine_utils::hints::unlikely;
+use orengine_utils::light_arc::LightArc;
 use crate::batch_receiver::{BatchReceiver, LockFreeBatchReceiver, LockFreePushBatchErr};
-use crate::hints::unlikely;
-use crate::light_arc::LightArc;
 use crate::number_types::{
     CachePaddedLongAtomic, LongAtomic, LongNumber, NotCachePaddedLongAtomic,
 };

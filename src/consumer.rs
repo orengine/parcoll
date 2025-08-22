@@ -1,5 +1,6 @@
 //! This module provides the [`Consumer`] and the [`LockFreeConsumer`] traits.
-use crate::hints::{unlikely, unreachable_hint, unwrap_or_bug_hint};
+use orengine_utils::hints::{unreachable_hint, unwrap_or_bug_hint};
+use orengine_utils::hints::unlikely;
 use crate::single_producer::{SingleLockFreeProducer, SingleProducer};
 use crate::LockFreePopErr;
 use std::mem::MaybeUninit;

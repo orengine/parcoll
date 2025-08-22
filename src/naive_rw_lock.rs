@@ -1,5 +1,5 @@
 //! This module provides [`NaiveRWLock`] and its guards.
-use crate::backoff::Backoff;
+use orengine_utils::backoff::Backoff;
 use crate::loom_bindings::sync::atomic::AtomicI32;
 use crate::number_types::NonCachePaddedAtomicI32;
 use std::cell::UnsafeCell;

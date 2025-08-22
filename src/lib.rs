@@ -10,8 +10,6 @@
 //! All queues are lock-free (or lock-free with the proper generics),
 //! generalized and can be either be cache-padded or not.
 //!
-//! It also provides other useful utilities like [`LightArc`] or [`hints`].
-//!
 //! ```rust
 //! use parcoll::{Consumer, Producer};
 //!
@@ -106,13 +104,10 @@
     clippy::result_unit_err,
     reason = "The function's doc should explain what it returns."
 )]
-pub mod backoff;
 pub(crate) mod batch_receiver;
 pub mod buffer_version;
-pub mod cache_padded;
+pub(crate) mod cache_padded;
 mod consumer;
-pub mod hints;
-mod light_arc;
 mod lock_free_errors;
 #[cfg(all(parcoll_loom, test))]
 mod loom;
@@ -136,7 +131,8 @@ mod test_lock;
 
 pub use batch_receiver::BatchReceiver;
 pub use consumer::{Consumer, LockFreeConsumer};
-pub use light_arc::LightArc;
 pub use lock_free_errors::*;
 pub use mutex_vec_queue::MutexVecQueue;
 pub use producer::{LockFreeProducer, Producer};
+pub use orengine_utils::light_arc::LightArc;
+pub use orengine_utils;
