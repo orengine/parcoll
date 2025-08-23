@@ -94,7 +94,7 @@ impl<T, AtomicWrapper: Deref<Target = AtomicI32> + Default> NaiveRWLock<T, Atomi
 
     /// Tries to acquire a read lock. Returns `None` if a write lock is held.
     pub fn try_read(&self) -> Option<NaiveRWLockReadGuard<T, AtomicWrapper>> {
-        let mut state = self.state.load(Ordering::Acquire);
+        let mut state = self.state.load(Ordering::Relaxed);
 
         loop {
             if state != -1 {
@@ -102,7 +102,7 @@ impl<T, AtomicWrapper: Deref<Target = AtomicI32> + Default> NaiveRWLock<T, Atomi
                     state,
                     state + 1,
                     Ordering::Acquire,
-                    Ordering::Acquire,
+                    Ordering::Relaxed,
                 ) {
                     Ok(_) => break Some(NaiveRWLockReadGuard { rw_lock: self }),
                     Err(current_state) => {
@@ -119,7 +119,7 @@ impl<T, AtomicWrapper: Deref<Target = AtomicI32> + Default> NaiveRWLock<T, Atomi
     pub fn try_write(&self) -> Option<NaiveRWLockWriteGuard<T, AtomicWrapper>> {
         match self
             .state
-            .compare_exchange(0, -1, Ordering::Acquire, Ordering::Relaxed)
+            .compare_exchange(0, -1, Ordering::Release, Ordering::Relaxed)
         {
             Ok(_) => Some(NaiveRWLockWriteGuard { rw_lock: self }),
             Err(_) => None,
