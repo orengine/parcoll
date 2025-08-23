@@ -3,7 +3,7 @@
 This repository provides optimized collections which can be used in concurrent runtimes.
 
 It provides optimized ring-based SPSC (const bounded or unbounded),
-SPMC (const bounded or unbounded) and bounded MPMC queue.
+SPMC (const bounded or unbounded) and const bounded MPMC queues.
 
 All queues are lock-free (or lock-free with the proper generics), generalized and can be
 either be cache-padded or not.
