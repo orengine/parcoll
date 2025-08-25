@@ -1,6 +1,6 @@
 [package]
 name = "parcoll"
-version = "1.1.0"
+version = "1.2.0"
 edition = "2021"
 description = "Collections for parallel computing, such as SPSC, SPMC, and MPSC and MPMC queues."
 repository = "https://github.com/orengine/parcoll"

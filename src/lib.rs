@@ -66,6 +66,10 @@
 #![warn(clippy::nursery)]
 #![warn(clippy::cargo)]
 #![allow(
+    clippy::redundant_feature_names,
+    reason = "It is impossible to write feature-dependencies without it"
+)]
+#![allow(
     clippy::multiple_crate_versions,
     reason = "They were set by dev-dependencies"
 )]
