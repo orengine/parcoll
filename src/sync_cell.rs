@@ -18,22 +18,22 @@ pub trait SyncCell<T> {
     /// For [`LockFreeSyncCell`], this method always returns `Some`.
     fn try_with<U>(&self, f: impl FnOnce(&T) -> U) -> Option<U>;
 
-    /// Tries to swap the value.
-    /// It returns `Ok(old_value)` or `Err(value)` if the [`SyncCell`] is locked.
+    /// Tries to store the value.
+    /// It returns `Ok(())` or `Err(value)` if the [`SyncCell`] is locked.
     ///
     /// For [`LockFreeSyncCell`], this method always returns `Ok`.
-    fn try_swap(&self, value: T) -> Result<T, T>;
+    fn try_store(&self, value: T) -> Result<(), T>;
 
-    /// Swaps the value using busy-waiting with [`Backoff`].
-    /// It returns the old value.
+    /// Tries to store the value using busy-waiting with [`Backoff`].
     ///
     /// For [`LockFreeSyncCell`], this method never blocks.
-    fn swap(&self, mut value: T) -> T {
-        let backoff = Backoff::new();
+    fn swap(&self, mut value: T) {
+        let backoff = 
+            Backoff::new();
 
         loop {
-            match self.try_swap(value) {
-                Ok(value) => return value,
+            match self.try_store(value) {
+                Ok(()) => return,
                 Err(value_) => {
                     value = value_;
 
@@ -64,12 +64,14 @@ impl<T> SyncCell<T> for NaiveRWLock<T> {
         self.try_read().map(|guard| f(&*guard))
     }
 
-    fn try_swap(&self, value: T) -> Result<T, T> {
+    fn try_store(&self, value: T) -> Result<(), T> {
         let Some(mut guard) = self.try_write() else {
             return Err(value);
         };
 
-        Ok(std::mem::replace(&mut *guard, value))
+        drop(std::mem::replace(&mut *guard, value));
+
+        Ok(())
     }
 }
 
@@ -86,12 +88,14 @@ impl<T> SyncCell<T> for std::sync::RwLock<T> {
         self.read().map(|guard| f(&*guard)).ok()
     }
 
-    fn try_swap(&self, value: T) -> Result<T, T> {
+    fn try_store(&self, value: T) -> Result<(), T> {
         let Some(mut guard) = self.try_write().ok() else {
             return Err(value);
         };
 
-        Ok(std::mem::replace(&mut *guard, value))
+        drop(std::mem::replace(&mut *guard, value));
+
+        Ok(())
     }
 }
 
@@ -108,22 +112,24 @@ impl<T> SyncCell<T> for std::sync::Mutex<T> {
         self.lock().map(|guard| f(&*guard)).ok()
     }
 
-    fn try_swap(&self, value: T) -> Result<T, T> {
+    fn try_store(&self, value: T) -> Result<(), T> {
         let Some(mut guard) = self.lock().ok() else {
             return Err(value);
         };
 
-        Ok(std::mem::replace(&mut *guard, value))
+        drop(std::mem::replace(&mut *guard, value));
+
+        Ok(())
     }
 }
 
 /// A mocking implementation of [`LockFreeSyncCell`]. But it is not lock-free.
-#[cfg(test)]
+#[cfg(all(test, not(feature = "with-light-qsbr")))]
 pub(crate) struct LockFreeSyncCellMock<T> {
     inner: NaiveRWLock<T>,
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "with-light-qsbr")))]
 impl<T> SyncCell<T> for LockFreeSyncCellMock<T> {
     fn from_value(value: T) -> Self {
         Self {
@@ -139,10 +145,64 @@ impl<T> SyncCell<T> for LockFreeSyncCellMock<T> {
         self.inner.try_with(f)
     }
 
-    fn try_swap(&self, value: T) -> Result<T, T> {
-        self.inner.try_swap(value)
+    fn try_store(&self, value: T) -> Result<(), T> {
+        self.inner.try_store(value)
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "with-light-qsbr")))]
 impl<T> LockFreeSyncCell<T> for LockFreeSyncCellMock<T> {}
+
+#[cfg(feature = "with-light-qsbr")]
+pub struct LightQSBRSyncCell<T> {
+    inner: crate::loom_bindings::sync::atomic::AtomicPtr<T>,
+}
+
+#[cfg(feature = "with-light-qsbr")]
+impl<T> SyncCell<T> for LightQSBRSyncCell<T> {
+    fn from_value(value: T) -> Self {
+        Self {
+            inner: crate::loom_bindings::sync::atomic::AtomicPtr::new(Box::into_raw(Box::new(value))),
+        }
+    }
+
+    fn get_mut(&mut self) -> &mut T {
+        unsafe { &mut **self.inner.get_mut() }
+    }
+
+    fn try_with<U>(&self, f: impl FnOnce(&T) -> U) -> Option<U> {
+        let value = self.inner.load(std::sync::atomic::Ordering::Acquire);
+        
+        Some(f(unsafe { &*value }))
+    }
+
+    fn try_store(&self, value: T) -> Result<(), T> {
+        let new = Box::into_raw(Box::new(value));
+        let prev = self.inner.swap(new, std::sync::atomic::Ordering::AcqRel);
+
+        if std::mem::needs_drop::<T>() {
+            unsafe {
+                light_qsbr::local_manager().schedule_drop(move || {
+                    drop(Box::from_raw(prev));
+                });
+            };
+        } else {
+            unsafe { light_qsbr::local_manager().schedule_deallocate(prev); };
+        }
+
+        Ok(())
+    }
+
+    fn swap(&self, value: T) {
+        orengine_utils::hints::unwrap_or_bug_hint(self.try_store(value))
+    }
+}
+
+#[cfg(feature = "with-light-qsbr")]
+impl<T> LockFreeSyncCell<T> for LightQSBRSyncCell<T> {}
+
+#[cfg(all(test, not(feature = "with-light-qsbr")))]
+pub(crate) type LockFreeSyncCellForTests<T> = LockFreeSyncCellMock<T>;
+
+#[cfg(all(test, feature = "with-light-qsbr"))]
+pub(crate) type LockFreeSyncCellForTests<T> = LightQSBRSyncCell<T>;
