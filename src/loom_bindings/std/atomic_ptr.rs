@@ -1,6 +1,6 @@
 use std::cell::UnsafeCell;
 use std::fmt;
-use std::ops::Deref;
+use std::ops::{Deref, DerefMut};
 use std::sync::atomic::Ordering;
 
 macro_rules! cfg_has_atomic_ptr {
@@ -53,6 +53,12 @@ cfg_has_atomic_ptr! {
             // safety: it is always safe to access `&self` fns on the inner value as
             // we never perform unsafe mutations.
             unsafe { &*self.inner.get() }
+        }
+    }
+
+    impl<T> DerefMut for AtomicPtr<T> {
+        fn deref_mut(&mut self) -> &mut Self::Target {
+            unsafe { &mut *self.inner.get() }
         }
     }
 

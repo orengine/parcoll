@@ -1198,7 +1198,7 @@ mod tests {
     use super::*;
     use crate::mutex_vec_queue::VecQueue;
     use crate::single_producer::{SingleLockFreeProducer, SingleProducer};
-    use crate::sync_cell::LockFreeSyncCellMock;
+    use crate::sync_cell::LockFreeSyncCellForTests;
     use crate::{Consumer, LockFreeConsumer, LockFreeProducer, Producer};
 
     const N: usize = 16000;
@@ -1316,9 +1316,14 @@ mod tests {
 
     #[test]
     fn test_spsc_unbounded_lock_free_seq_insertions() {
+        #[cfg(feature = "with-light-qsbr")]
+        let shared_manager = light_qsbr::SharedManager::new();
+        #[cfg(feature = "with-light-qsbr")]
+        shared_manager.register_new_executor();
+
         let (producer, consumer) = new_cache_padded_unbounded_with_sync_cell::<
             _,
-            LockFreeSyncCellMock<LightArc<Version<_>>>,
+            LockFreeSyncCellForTests<LightArc<Version<_>>>,
         >();
 
         for i in 0..N {
@@ -1330,7 +1335,7 @@ mod tests {
         }
 
         let (producer, consumer) =
-            new_unbounded_with_sync_cell::<_, LockFreeSyncCellMock<LightArc<Version<_>>>>();
+            new_unbounded_with_sync_cell::<_, LockFreeSyncCellForTests<LightArc<Version<_>>>>();
 
         for i in 0..N {
             producer.lock_free_maybe_push(i).unwrap();
@@ -1348,16 +1353,24 @@ mod tests {
                 assert_eq!(unsafe { item.assume_init() }, i * BATCH_SIZE + j);
             }
         }
+
+        #[cfg(feature = "with-light-qsbr")]
+        unsafe { light_qsbr::LocalManager::deregister() };
     }
 
     #[test]
     fn test_spsc_unbounded_lock_free_stealing() {
         const TRIES: usize = 100;
 
+        #[cfg(feature = "with-light-qsbr")]
+        let shared_manager = light_qsbr::SharedManager::new();
+        #[cfg(feature = "with-light-qsbr")]
+        shared_manager.register_new_executor();
+
         let (producer1, consumer) =
-            new_unbounded_with_sync_cell::<_, LockFreeSyncCellMock<LightArc<Version<_>>>>();
+            new_unbounded_with_sync_cell::<_, LockFreeSyncCellForTests<LightArc<Version<_>>>>();
         let (producer2, consumer2) =
-            new_unbounded_with_sync_cell::<_, LockFreeSyncCellMock<LightArc<Version<_>>>>();
+            new_unbounded_with_sync_cell::<_, LockFreeSyncCellForTests<LightArc<Version<_>>>>();
         let mut stolen = VecQueue::new();
 
         producer2.reserve(512);
@@ -1383,6 +1396,9 @@ mod tests {
         }
 
         assert_eq!(count + stolen.len(), N * TRIES);
+
+        #[cfg(feature = "with-light-qsbr")]
+        unsafe { light_qsbr::LocalManager::deregister() };
     }
 
     #[test]
@@ -1390,8 +1406,13 @@ mod tests {
         const BATCH_SIZE: usize = 30;
         const N: usize = BATCH_SIZE * 100;
 
+        #[cfg(feature = "with-light-qsbr")]
+        let shared_manager = light_qsbr::SharedManager::new();
+        #[cfg(feature = "with-light-qsbr")]
+        shared_manager.register_new_executor();
+
         let (producer, consumer) =
-            new_unbounded_with_sync_cell::<_, LockFreeSyncCellMock<LightArc<Version<_>>>>();
+            new_unbounded_with_sync_cell::<_, LockFreeSyncCellForTests<LightArc<Version<_>>>>();
 
         for i in 0..N / BATCH_SIZE / 2 {
             let slice = (0..BATCH_SIZE)
@@ -1432,5 +1453,8 @@ mod tests {
                 assert_eq!(unsafe { item.assume_init() }, index);
             }
         }
+
+        #[cfg(feature = "with-light-qsbr")]
+        unsafe { light_qsbr::LocalManager::deregister() };
     }
 }

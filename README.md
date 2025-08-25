@@ -77,5 +77,16 @@ All queues are optimized as much as possible (or we think so). It includes:
 - caching of atomics values where it makes sense;
 - using as low CAS as possible.
 
+# Features
+
+- `with-light-qsbr`: Enables [light-qsbr](https://github.com/orengine/light-qsbr) support.
+- `unbounded_slices_always_pow2`: Ensures that unbounded slices are always power of two
+  (it leads to more memory usage, but improves performance).
+- `always_steal`: Always steals from the other queue when possible 
+  (by default, it may not steal if the source queue has less than four elements).
+- `untested_memory_ordering`: Enables "untested" memory orderings.
+  Honestly, they pass tests, but we didn't test them with very weak memory ordering (like the abstract machine).
+  They seem correct and improve performance.
+
 If you have any idea how to make it even better, please let us know 
 (create either an issue or a pull request).
