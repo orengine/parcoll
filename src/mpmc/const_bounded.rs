@@ -46,7 +46,7 @@ use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
 // - Producers: update `tail`, write the value, then set the flag.
 //   This avoids concurrent writing into the same slot.
 // - Consumers: check the flag before reading.
-//   Problem: the consumer may have to wait for a writing operation at the head,
+//   Problem: the consumer may have to wait for a writing operation at the `tail`,
 //   so `pop` is no longer fully lock-free.
 //   Advantage: `push` can be lock-free — producers can write into the next slot
 //   while previous producers finish writing.
@@ -57,9 +57,9 @@ use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
 //       CAS on tail; if CAS succeeds: write value, set the flag, return;
 //       else retry.
 // Pop:  load tail; load head; compute a length; if empty, return;
-//       load a slot flag; if `empty`, retry;
-//       CAS on head; if CAS succeeds: read value, set the flag to empty, return;
-//       else retry.
+//       CAS on head; if CAS fail, retry;
+//       load a slot flag; while `empty`, spin and reload;
+//       read value, set the flag to `empty`, return;
 //
 // In the first approach, writers checked the slot's flag before writing, and
 // readers checked it before reading. This means both sides communicate not
@@ -74,8 +74,8 @@ use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
 //
 // A lap counter increments each time an index (head or tail) wraps around the
 // buffer. By associating each slot with the lap number of its last writing, we
-// can tell whether the data is from the current pass (safe to read) or from an
-// earlier pass (stale for readers, full for writers). This allows us to stop
+// can tell whether the data is from the current pass or from an
+// earlier pass. This allows us to stop
 // checking head for writing safety and tail for reading safety, relying instead
 // on per-slot state derived from lap information.
 // In the `push` method load only the tail and the lap,

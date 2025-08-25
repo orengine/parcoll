@@ -3,7 +3,7 @@
 This repository provides optimized collections which can be used in concurrent runtimes.
 
 It provides optimized ring-based SPSC (const bounded or unbounded),
-SPMC (const bounded or unbounded) and bounded MPMC queue.
+SPMC (const bounded or unbounded) and const bounded MPMC queues.
 
 All queues are lock-free (or lock-free with the proper generics), generalized and can be
 either be cache-padded or not.
@@ -15,7 +15,7 @@ use parcoll::{Consumer, Producer};
 
 fn mpmc() {
     let (producer, consumer) = parcoll::mpmc::new_cache_padded_bounded::<_, 256>();
-    let producer2 = producer.clone();
+    let producer2 = producer.clone(); // You can clone the producer
     let consumer2 = consumer.clone(); // You can clone the consumer
     
     producer.maybe_push(1).unwrap();
@@ -46,6 +46,7 @@ fn spsc_unbounded() {
 fn spmc() {
     let (producer1, consumer1) = parcoll::spmc::new_bounded::<_, 256>();
     let (producer2, consumer2) = parcoll::spmc::new_bounded::<_, 256>();
+    let consumer3 = consumer2.clone(); // You can clone the consumer
     
     for i in 0..100 {
         producer1.maybe_push(i).unwrap();
@@ -77,4 +78,4 @@ All queues are optimized as much as possible (or we think so). It includes:
 - using as low CAS as possible.
 
 If you have any idea how to make it even better, please let us know 
-(create either issue or pull request).
+(create either an issue or a pull request).
