@@ -194,7 +194,7 @@ impl<T> SyncCell<T> for LightQSBRSyncCell<T> {
     }
 
     fn swap(&self, value: T) {
-        orengine_utils::hints::unwrap_or_bug_hint(self.try_store(value))
+        orengine_utils::hints::unwrap_or_bug_hint(self.try_store(value));
     }
 }
 
