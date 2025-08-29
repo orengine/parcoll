@@ -1,4 +1,4 @@
-//! This module provides the [`MutexVecQueue`].
+//! This module provides the [`MutexVecQueue`] and the [`VecQueue`].
 use orengine_utils::hints::unlikely;
 use orengine_utils::light_arc::LightArc;
 use orengine_utils::hints::assert_hint;
@@ -9,7 +9,9 @@ use std::ptr::slice_from_raw_parts;
 use std::{mem, ptr};
 
 /// A queue that uses a vector to store the elements.
-pub(crate) struct VecQueue<T> {
+///
+/// Unlike [`std::collections::VecDeque`], this queue is not double ended.
+pub struct VecQueue<T> {
     ptr: *mut T,
     head: usize,
     tail: usize,
@@ -40,7 +42,7 @@ impl<T> VecQueue<T> {
     }
 
     /// Returns the mask for the given capacity.
-    fn get_mask_for_capacity(capacity: usize) -> usize {
+    const fn get_mask_for_capacity(capacity: usize) -> usize {
         debug_assert!(capacity.is_power_of_two());
 
         capacity - 1
@@ -54,8 +56,19 @@ impl<T> VecQueue<T> {
         index & self.mask
     }
 
-    /// Creates a new vector with the default capacity.
-    pub(crate) fn new() -> Self {
+    /// Creates a new `VecQueue` without any capacity.
+    pub const fn new_const() -> Self {
+        Self {
+            ptr: ptr::null_mut(),
+            head: 0,
+            tail: 0,
+            capacity: 0,
+            mask: 0,
+        }
+    }
+
+    /// Creates a new `VecQueue` with the default capacity.
+    pub fn new() -> Self {
         const DEFAULT_CAPACITY: usize = 16;
 
         Self {
@@ -68,21 +81,40 @@ impl<T> VecQueue<T> {
     }
 
     /// Returns the number of elements in the queue.
-    pub(crate) fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         self.tail.wrapping_sub(self.head)
     }
 
     /// Returns whether the queue is empty.
-    pub(crate) fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.head == self.tail
     }
 
     /// Extends the vector to the given capacity.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the provided capacity is not a power of two or is less than the current capacity.
     #[inline(never)]
     #[cold]
     #[track_caller]
-    pub(crate) fn extend_to(&mut self, capacity: usize) {
-        debug_assert!(capacity > self.capacity);
+    pub fn extend_to(&mut self, capacity: usize) {
+        #[inline(never)]
+        #[cold]
+        fn extend_from_zero<T>(queue: &mut VecQueue<T>, capacity: usize) {
+            queue.mask = VecQueue::<T>::get_mask_for_capacity(capacity);
+            queue.ptr = VecQueue::<T>::allocate(capacity);
+            queue.capacity = capacity;
+        }
+
+        if unlikely(self.capacity == 0 && capacity == 0) {
+            extend_from_zero(self, 4);
+
+            return;
+        }
+
+        assert!(capacity.is_power_of_two(), "Capacity must be a power of two, provided {capacity}");
+        assert!(capacity > self.capacity);
 
         let new_ptr = Self::allocate(capacity);
         let len = self.len();
@@ -116,7 +148,7 @@ impl<T> VecQueue<T> {
 
     /// Pushes a value to the queue.
     #[inline]
-    pub(crate) fn push(&mut self, value: T) {
+    pub fn push(&mut self, value: T) {
         if unlikely(self.len() == self.capacity) {
             self.extend_to(self.capacity * 2);
         }
@@ -132,7 +164,7 @@ impl<T> VecQueue<T> {
 
     /// Pops a value from the queue.
     #[inline]
-    pub(crate) fn pop(&mut self) -> Option<T> {
+    pub fn pop(&mut self) -> Option<T> {
         if self.is_empty() {
             return None;
         }
@@ -151,7 +183,7 @@ impl<T> VecQueue<T> {
     ///
     /// It `T` is not `Copy`, the caller should [`forget`](mem::forget) the values.
     #[inline]
-    pub(crate) unsafe fn extend_from_slice(&mut self, slice: &[T]) {
+    pub unsafe fn extend_from_slice(&mut self, slice: &[T]) {
         let needed = self.len() + slice.len();
 
         if unlikely(needed > self.capacity) {
@@ -218,6 +250,28 @@ impl<T> VecQueue<T> {
         unsafe { producer.push_many_unchecked(slice1, slice2) };
 
         // The head is already updated.
+    }
+}
+
+impl<T: Clone> Clone for VecQueue<T> {
+    fn clone(&self) -> Self {
+        let mut new = Self::new();
+
+        new.extend_to(new.capacity);
+
+        for i in 0..self.len() {
+            let elem = unsafe { &*self.ptr.add(self.get_physical_index(self.head + i)) };
+
+            new.push(elem.clone());
+        }
+
+        new
+    }
+}
+
+impl<T> Default for VecQueue<T> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -393,7 +447,7 @@ mod tests {
 
     #[test]
     fn test_vec_queue() {
-        let mut queue = VecQueue::new();
+        let mut queue = VecQueue::new_const();
 
         for i in 0..N {
             queue.push(i);
