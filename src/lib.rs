@@ -133,7 +133,7 @@ pub mod sync_cell;
 #[cfg(not(parcoll_loom))]
 mod test_lock;
 
-pub use batch_receiver::BatchReceiver;
+pub use batch_receiver::{BatchReceiver, LockFreeBatchReceiver};
 pub use consumer::{Consumer, LockFreeConsumer};
 pub use lock_free_errors::*;
 pub use mutex_vec_queue::MutexVecQueue;
