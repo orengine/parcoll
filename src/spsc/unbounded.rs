@@ -1195,8 +1195,8 @@ pub fn new_cache_padded_unbounded<T: Send>() -> (
 
 #[cfg(test)]
 mod tests {
+    use orengine_utils::VecQueue;
     use super::*;
-    use crate::mutex_vec_queue::VecQueue;
     use crate::single_producer::{SingleLockFreeProducer, SingleProducer};
     use crate::sync_cell::LockFreeSyncCellForTests;
     use crate::{Consumer, LockFreeConsumer, LockFreeProducer, Producer};
