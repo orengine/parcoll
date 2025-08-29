@@ -136,7 +136,7 @@ mod test_lock;
 pub use batch_receiver::BatchReceiver;
 pub use consumer::{Consumer, LockFreeConsumer};
 pub use lock_free_errors::*;
-pub use mutex_vec_queue::MutexVecQueue;
+pub use mutex_vec_queue::{MutexVecQueue, VecQueue};
 pub use producer::{LockFreeProducer, Producer};
 pub use orengine_utils::light_arc::LightArc;
 pub use orengine_utils;
