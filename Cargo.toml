@@ -14,7 +14,7 @@ rust-version = "1.83.0"
 exclude = ["./images/*"]
 
 [dependencies]
-orengine-utils = ">=1.1"
+orengine-utils = ">=1.4"
 light-qsbr = {  version = ">=1.0.1", optional = true }
 
 [target.'cfg(parcoll_loom)'.dependencies]
